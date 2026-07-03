@@ -4,13 +4,13 @@
 
 ---
 
-## 📋 Descripción General
+## Descripción General
 
 Este repositorio contiene el proyecto ETL desarrollado con **SQL Server Integration Services (SSIS)** para cargar datos de ventas desde archivos CSV hacia el Data Warehouse **DWUTVTVentas**. El proceso implementa limpieza, validación, transformación, cálculo de métricas y auditoría de errores.
 
 ---
 
-## 🏗️ Arquitectura del Proyecto
+## Arquitectura del Proyecto
 
 ```
 Archivos CSV (Entrada)
@@ -39,7 +39,7 @@ Archivos CSV (Entrada)
 
 ---
 
-## 📁 Estructura del Repositorio
+## Estructura del Repositorio
 
 ```
 Proyecto_ETL_UTVT/
@@ -69,7 +69,7 @@ Proyecto_ETL_UTVT/
 
 ---
 
-## 🗄️ Base de Datos: DWUTVTVentas
+## Base de Datos: DWUTVTVentas
 
 | Tabla | Descripción |
 |---|---|
@@ -81,7 +81,7 @@ Proyecto_ETL_UTVT/
 
 ---
 
-## ✅ Reglas de Calidad de Datos
+## Reglas de Calidad de Datos
 
 ### Clientes
 - Texto en MAYÚSCULAS y sin espacios innecesarios (TRIM)
@@ -104,7 +104,7 @@ Proyecto_ETL_UTVT/
 
 ---
 
-## ▶️ Instrucciones de Ejecución
+## Instrucciones de Ejecución
 
 ### 1. Crear la base de datos
 ```sql
@@ -130,7 +130,7 @@ Ajustar las variables en `CargaVentas.dtsx`:
 
 ---
 
-## 📊 Variables del Paquete
+## Variables del Paquete
 
 | Variable | Tipo | Propósito |
 |---|---|---|
@@ -144,7 +144,7 @@ Ajustar las variables en `CargaVentas.dtsx`:
 
 ---
 
-## 🌿 Ramas de Desarrollo
+## Ramas de Desarrollo
 
 | Rama | Descripción |
 |---|---|
@@ -155,13 +155,13 @@ Ajustar las variables en `CargaVentas.dtsx`:
 
 ---
 
-## 📦 Release
+## Release
 
 - **Release 1.0** — Primera versión funcional completa del proceso ETL
 
 ---
 
-## 👤 Autor
+## Autor
 
 - **Proyecto:** Examen Práctico — ETL con SSIS, SQL Server y Git
 - **Integrantes:** Joel Alejandro Lara Rodriguez y Jaime Diaz Gonzalez
