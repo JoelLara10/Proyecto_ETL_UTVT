@@ -1,0 +1,32 @@
+# .gitignore — Proyecto ETL UTVT
+
+# SQL Server Integration Services archivos de usuario
+*.dtproj.user
+*.suo
+*.user
+*.userosscache
+
+# Visual Studio
+.vs/
+*.sln.docstates
+bin/
+obj/
+
+# Archivos procesados y errores (generados en tiempo de ejecución)
+data/procesados/
+data/errores/
+
+# Archivos ZIP generados por el proceso
+*.zip
+
+# Archivos temporales del sistema
+Thumbs.db
+.DS_Store
+*~
+
+# Credenciales y configuración local
+*.config.local
+*.dtproj.user
+
+# Logs locales
+*.log
