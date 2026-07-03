@@ -1,0 +1,24 @@
+Release 1.0 — Comercializadora UTVT S.A. de C.V.
+Proyecto ETL con SSIS, SQL Server y Git
+
+Fecha de liberación: 2026-07-03
+
+Contenido de esta versión:
+- Paquete SSIS: CargaVentas.dtsx con Control Flow y tres Data Flows
+- Script SQL: create_DWUTVTVentas.sql (DimCliente, DimProducto, FactVentas, LogErrores, LogProceso)
+- Limpieza y validación de Clientes, Productos y Ventas
+- Cálculo de Subtotal, IVA y Total en FactVentas
+- Manejo de errores con Error Output y registro en LogErrores
+- Bitácora de ejecución en LogProceso
+- Automatización: mover archivos procesados y compresión ZIP con PowerShell
+- Repositorio Git con ramas feature/clientes, feature/productos, feature/ventas
+- Documentación completa en README.md
+
+Categorías de productos aceptadas:
+  Computo, Accesorios, Muebles, Redes, Almacenamiento, Infraestructura
+
+Validaciones implementadas:
+  - Clientes: Activo=1, sin duplicados, campos en mayúsculas y sin espacios
+  - Productos: Activo=1, Precio>0, Costo>0, Categoría válida
+  - Ventas: Cantidad>0, PrecioUnitario>0, FechaVenta válida,
+            Cliente y Producto existentes en dimensiones, sin duplicados
