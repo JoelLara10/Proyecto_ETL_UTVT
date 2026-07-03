@@ -1,510 +1,2413 @@
-<?xml version="1.0"?>
-<DTS:Executable
-  xmlns:DTS="www.microsoft.com/SqlServer/Dts"
-  DTS:ExecutableType="SSIS.Package.3"
-  DTS:ProtectionLevel="1"
-  DTS:PackageFormatVersion="8"
-  DTS:VersionMajor="1"
-  DTS:VersionMinor="0"
-  DTS:VersionBuild="0"
-  DTS:CreationDate="7/3/2026 7:00:00 AM"
-  DTS:PackageName="CargaVentas"
-  DTS:DTSID="{11111111-1111-1111-1111-111111111111}">
-
-  <!-- ============================================================ -->
-  <!-- VARIABLES DEL PAQUETE                                        -->
-  <!-- ============================================================ -->
-  <DTS:Variables>
-    <DTS:Variable DTS:Name="RutaEntrada"     DTS:DataType="8"><DTS:VariableValue>C:\Proyecto_ETL_UTVT\data\entrada\</DTS:VariableValue></DTS:Variable>
-    <DTS:Variable DTS:Name="RutaProcesado"   DTS:DataType="8"><DTS:VariableValue>C:\Proyecto_ETL_UTVT\data\procesados\</DTS:VariableValue></DTS:Variable>
-    <DTS:Variable DTS:Name="RutaErrores"     DTS:DataType="8"><DTS:VariableValue>C:\Proyecto_ETL_UTVT\data\errores\</DTS:VariableValue></DTS:Variable>
-    <DTS:Variable DTS:Name="FechaProceso"    DTS:DataType="16"><DTS:VariableValue>1/1/1900 12:00:00 AM</DTS:VariableValue></DTS:Variable>
-    <DTS:Variable DTS:Name="TotalLeidos"     DTS:DataType="3"><DTS:VariableValue>0</DTS:VariableValue></DTS:Variable>
-    <DTS:Variable DTS:Name="TotalInsertados" DTS:DataType="3"><DTS:VariableValue>0</DTS:VariableValue></DTS:Variable>
-    <DTS:Variable DTS:Name="TotalErrores"    DTS:DataType="3"><DTS:VariableValue>0</DTS:VariableValue></DTS:Variable>
-    <DTS:Variable DTS:Name="IdProcesoLog"    DTS:DataType="3"><DTS:VariableValue>0</DTS:VariableValue></DTS:Variable>
-  </DTS:Variables>
-
-  <!-- ============================================================ -->
-  <!-- CONTROL FLOW                                                  -->
-  <!--                                                              -->
-  <!--  SEQ_Inicio                                                  -->
-  <!--    SQL_RegistrarInicio                                       -->
-  <!--    SEQ_CargaClientes                                         -->
-  <!--      DFT_CargaClientes                                       -->
-  <!--    SEQ_CargaProductos                                        -->
-  <!--      DFT_CargaProductos                                      -->
-  <!--    SEQ_CargaVentas                                           -->
-  <!--      DFT_CargaVentas                                         -->
-  <!--    SQL_RegistrarEstadisticas                                 -->
-  <!--    SEQ_PostProceso                                           -->
-  <!--      FST_MoverClientes                                       -->
-  <!--      FST_MoverProductos                                      -->
-  <!--      FST_MoverVentas                                         -->
-  <!--      EPT_ComprimirArchivos                                   -->
-  <!-- ============================================================ -->
-
-  <DTS:Executables>
-
-    <!-- ── Sequence Container: Proceso Completo ── -->
-    <DTS:Executable DTS:ExecutableType="SSIS.Sequence.3"
-                    DTS:TaskName="SEQ_Inicio"
-                    DTS:DTSID="{AAAA0001-0000-0000-0000-000000000001}">
-      <DTS:Executables>
-
-        <!-- 1. Execute SQL: Registrar inicio en LogProceso -->
-        <DTS:Executable DTS:ExecutableType="Microsoft.ExecuteSQLTask"
-                        DTS:TaskName="SQL_RegistrarInicio"
-                        DTS:DTSID="{AAAA0002-0000-0000-0000-000000000002}">
-          <DTS:ObjectData>
-            <SQLTask:SqlTaskData
-              xmlns:SQLTask="www.microsoft.com/sqlserver/dts/tasks/sqltask"
-              SQLTask:Connection="CM_DWUTVTVentas"
-              SQLTask:ResultType="ResultSetType_SingleRow"
-              SQLTask:SqlStatementSource="INSERT INTO dbo.LogProceso (NombrePaquete, FechaInicio, Estatus, Mensaje)
-VALUES ('CargaVentas.dtsx', GETDATE(), 'EN_PROCESO', 'Inicio de ejecucion');
-SELECT SCOPE_IDENTITY() AS IdProceso;">
-              <SQLTask:ResultBinding
-                SQLTask:Name="IdProceso"
-                SQLTask:DtsVariableName="User::IdProcesoLog"
-                SQLTask:Type="1" />
-            </SQLTask:SqlTaskData>
-          </DTS:ObjectData>
-        </DTS:Executable>
-
-        <!-- 2. Sequence Container: Carga Clientes -->
-        <DTS:Executable DTS:ExecutableType="SSIS.Sequence.3"
-                        DTS:TaskName="SEQ_CargaClientes"
-                        DTS:DTSID="{AAAA0010-0000-0000-0000-000000000010}">
-          <DTS:Executables>
-            <!--
-              Data Flow Task: DFT_CargaClientes
-              ─────────────────────────────────
-              Fuente     : Flat File Source → Clientes.csv
-              Transformaciones:
-                - Derived Column  : TRIM(Nombre), TRIM(Apellido), UPPER(Nombre), UPPER(Apellido)
-                                    UPPER(Correo), ISNULL(Ciudad) → 'SIN CIUDAD', etc.
-                - Conditional Split:
-                    Activo == 1           → Válidos
-                    Else                  → Inactivos (Error Output)
-                - Sort (IdCliente ASC)  : para deduplicación
-                - Aggregate             : GROUP BY IdCliente (MIN para mantener primera ocurrencia)
-                - Data Conversion       : FechaRegistro a DT_DATE
-                - Lookup               : verificar que IdCliente no exista ya en DimCliente
-                - OLE DB Destination   : DimCliente
-                - Error handling       : Flat File Destination → errores/Errores_Clientes.csv
-                                         OLE DB Command → LogErrores
-            -->
-            <DTS:Executable DTS:ExecutableType="SSIS.Pipeline.3"
-                            DTS:TaskName="DFT_CargaClientes"
-                            DTS:DTSID="{AAAA0011-0000-0000-0000-000000000011}">
-              <DTS:ObjectData>
-                <pipeline version="1">
-                  <components>
-                    <!-- Flat File Source -->
-                    <component id="1" name="SRC_Clientes" componentClassID="Microsoft.FlatFileSource">
-                      <properties>
-                        <property name="RetainNulls">0</property>
-                      </properties>
-                      <connections>
-                        <connection id="1" name="FlatFileConnection" connectionManagerID="CM_FF_Clientes"/>
-                      </connections>
-                    </component>
-                    <!-- Derived Column: limpieza -->
-                    <component id="2" name="DRV_LimpiezaClientes" componentClassID="Microsoft.DerivedColumn">
-                      <inputs><input id="21" name="Derived Column Input"/></inputs>
-                      <outputs>
-                        <output id="22" name="Derived Column Output">
-                          <outputColumns>
-                            <outputColumn id="221" name="Nombre_Limpio"   dataType="str" length="100" expression="UPPER(TRIM([Nombre]))"/>
-                            <outputColumn id="222" name="Apellido_Limpio" dataType="str" length="100" expression="UPPER(TRIM([Apellido]))"/>
-                            <outputColumn id="223" name="Correo_Limpio"   dataType="str" length="150" expression="LOWER(TRIM([Correo]))"/>
-                            <outputColumn id="224" name="Ciudad_Limpia"   dataType="str" length="100" expression='ISNULL([Ciudad]) ? "SIN CIUDAD" : UPPER(TRIM([Ciudad]))'/>
-                            <outputColumn id="225" name="Estado_Limpio"   dataType="str" length="100" expression='ISNULL([Estado]) ? "SIN ESTADO" : UPPER(TRIM([Estado]))'/>
-                            <outputColumn id="226" name="Pais_Limpio"     dataType="str" length="100" expression='ISNULL([Pais]) ? "MEXICO" : UPPER(TRIM([Pais]))'/>
-                          </outputColumns>
-                        </output>
-                      </outputs>
-                    </component>
-                    <!-- Conditional Split: Activos vs Inactivos -->
-                    <component id="3" name="CSPL_FiltroActivos" componentClassID="Microsoft.ConditionalSplit">
-                      <outputs>
-                        <output id="31" name="Clientes_Activos"  isErrorOut="false"><outputColumns/><conditions><condition id="311" expression="[Activo] == 1" evaluationOrder="1" outputId="31"/></conditions></output>
-                        <output id="32" name="Clientes_Inactivos" isErrorOut="true"/>
-                      </outputs>
-                    </component>
-                    <!-- OLE DB Destination: DimCliente -->
-                    <component id="9" name="DST_DimCliente" componentClassID="Microsoft.OleDbDestination">
-                      <properties>
-                        <property name="OpenRowset">dbo.DimCliente</property>
-                        <property name="AccessMode">3</property>
-                      </properties>
-                      <connections>
-                        <connection id="91" name="OleDbConnection" connectionManagerID="CM_DWUTVTVentas"/>
-                      </connections>
-                    </component>
-                    <!-- Flat File Destination: errores -->
-                    <component id="10" name="DST_ErroresClientes" componentClassID="Microsoft.FlatFileDestination">
-                      <connections>
-                        <connection id="101" name="FlatFileConnection" connectionManagerID="CM_FF_ErroresClientes"/>
-                      </connections>
-                    </component>
-                  </components>
-                </pipeline>
-              </DTS:ObjectData>
-            </DTS:Executable>
-          </DTS:Executables>
-        </DTS:Executable>
-
-        <!-- 3. Sequence Container: Carga Productos -->
-        <DTS:Executable DTS:ExecutableType="SSIS.Sequence.3"
-                        DTS:TaskName="SEQ_CargaProductos"
-                        DTS:DTSID="{AAAA0020-0000-0000-0000-000000000020}">
-          <DTS:Executables>
-            <!--
-              Data Flow Task: DFT_CargaProductos
-              ────────────────────────────────────
-              Fuente     : Flat File Source → Productos.csv
-              Transformaciones:
-                - Derived Column  : TRIM / UPPER de campos de texto
-                - Conditional Split:
-                    Activo == 1
-                    AND Precio > 0
-                    AND Costo > 0
-                    AND Categoria IN ("COMPUTO","ACCESORIOS","MUEBLES","REDES","ALMACENAMIENTO","INFRAESTRUCTURA")
-                      → Válidos
-                    Else → Inválidos (Error Output)
-                - Sort (IdProducto ASC)
-                - Lookup: IdProducto no exista en DimProducto
-                - OLE DB Destination: DimProducto
-                - Error handling → Errores_Productos.csv + LogErrores
-            -->
-            <DTS:Executable DTS:ExecutableType="SSIS.Pipeline.3"
-                            DTS:TaskName="DFT_CargaProductos"
-                            DTS:DTSID="{AAAA0021-0000-0000-0000-000000000021}">
-              <DTS:ObjectData>
-                <pipeline version="1">
-                  <components>
-                    <component id="1" name="SRC_Productos" componentClassID="Microsoft.FlatFileSource">
-                      <connections><connection id="1" connectionManagerID="CM_FF_Productos"/></connections>
-                    </component>
-                    <component id="2" name="DRV_LimpiezaProductos" componentClassID="Microsoft.DerivedColumn">
-                      <outputs>
-                        <output id="22" name="Derived Column Output">
-                          <outputColumns>
-                            <outputColumn id="221" name="Nombre_Limpio"    dataType="str" length="150" expression="UPPER(TRIM([NombreProducto]))"/>
-                            <outputColumn id="222" name="Categoria_Limpia" dataType="str" length="100" expression="UPPER(TRIM([Categoria]))"/>
-                          </outputColumns>
-                        </output>
-                      </outputs>
-                    </component>
-                    <component id="3" name="CSPL_FiltroProductos" componentClassID="Microsoft.ConditionalSplit">
-                      <outputs>
-                        <output id="31" name="Productos_Validos" isErrorOut="false">
-                          <conditions>
-                            <condition id="311" evaluationOrder="1" outputId="31"
-                              expression='[Activo] == 1 &amp;&amp; [Precio] > 0 &amp;&amp; [Costo] > 0 &amp;&amp; ([Categoria_Limpia] == "COMPUTO" || [Categoria_Limpia] == "ACCESORIOS" || [Categoria_Limpia] == "MUEBLES" || [Categoria_Limpia] == "REDES" || [Categoria_Limpia] == "ALMACENAMIENTO" || [Categoria_Limpia] == "INFRAESTRUCTURA")'/>
-                          </conditions>
-                        </output>
-                        <output id="32" name="Productos_Invalidos" isErrorOut="true"/>
-                      </outputs>
-                    </component>
-                    <component id="9" name="DST_DimProducto" componentClassID="Microsoft.OleDbDestination">
-                      <properties>
-                        <property name="OpenRowset">dbo.DimProducto</property>
-                        <property name="AccessMode">3</property>
-                      </properties>
-                      <connections><connection id="91" connectionManagerID="CM_DWUTVTVentas"/></connections>
-                    </component>
-                  </components>
-                </pipeline>
-              </DTS:ObjectData>
-            </DTS:Executable>
-          </DTS:Executables>
-        </DTS:Executable>
-
-        <!-- 4. Sequence Container: Carga Ventas -->
-        <DTS:Executable DTS:ExecutableType="SSIS.Sequence.3"
-                        DTS:TaskName="SEQ_CargaVentas"
-                        DTS:DTSID="{AAAA0030-0000-0000-0000-000000000030}">
-          <DTS:Executables>
-            <!--
-              Data Flow Task: DFT_CargaVentas
-              ─────────────────────────────────
-              Fuente     : Flat File Source → Ventas.csv
-              Transformaciones:
-                - Conditional Split (validaciones):
-                    Cantidad > 0
-                    AND PrecioUnitario > 0
-                    AND FechaVenta válida (no nula)
-                    → Válidos / Else → Inválidos
-                - Lookup IdCliente  en DimCliente  → obtener IdClienteSK
-                - Lookup IdProducto en DimProducto → obtener IdProductoSK
-                - Lookup IdVenta en FactVentas      → deduplicación
-                - Derived Column: cálculo de métricas
-                    Subtotal = Cantidad * PrecioUnitario
-                    IVA      = Subtotal * 0.16
-                    Total    = Subtotal + IVA
-                - OLE DB Destination: FactVentas
-                - Error handling → Errores_Ventas.csv + LogErrores
-            -->
-            <DTS:Executable DTS:ExecutableType="SSIS.Pipeline.3"
-                            DTS:TaskName="DFT_CargaVentas"
-                            DTS:DTSID="{AAAA0031-0000-0000-0000-000000000031}">
-              <DTS:ObjectData>
-                <pipeline version="1">
-                  <components>
-                    <component id="1" name="SRC_Ventas" componentClassID="Microsoft.FlatFileSource">
-                      <connections><connection id="1" connectionManagerID="CM_FF_Ventas"/></connections>
-                    </component>
-                    <component id="2" name="CSPL_ValidacionVentas" componentClassID="Microsoft.ConditionalSplit">
-                      <outputs>
-                        <output id="21" name="Ventas_Validas" isErrorOut="false">
-                          <conditions>
-                            <condition id="211" evaluationOrder="1" outputId="21"
-                              expression="[Cantidad] > 0 &amp;&amp; [PrecioUnitario] > 0 &amp;&amp; !ISNULL([FechaVenta])"/>
-                          </conditions>
-                        </output>
-                        <output id="22" name="Ventas_Invalidas" isErrorOut="true"/>
-                      </outputs>
-                    </component>
-                    <!-- Lookup: Cliente -->
-                    <component id="3" name="LKP_Cliente" componentClassID="Microsoft.Lookup">
-                      <properties>
-                        <property name="SqlCommand">SELECT IdClienteSK, IdClienteOrigen FROM dbo.DimCliente</property>
-                        <property name="NoMatchBehavior">1</property>
-                      </properties>
-                      <connections><connection id="31" connectionManagerID="CM_DWUTVTVentas"/></connections>
-                    </component>
-                    <!-- Lookup: Producto -->
-                    <component id="4" name="LKP_Producto" componentClassID="Microsoft.Lookup">
-                      <properties>
-                        <property name="SqlCommand">SELECT IdProductoSK, IdProductoOrigen FROM dbo.DimProducto</property>
-                        <property name="NoMatchBehavior">1</property>
-                      </properties>
-                      <connections><connection id="41" connectionManagerID="CM_DWUTVTVentas"/></connections>
-                    </component>
-                    <!-- Derived Column: métricas -->
-                    <component id="5" name="DRV_Metricas" componentClassID="Microsoft.DerivedColumn">
-                      <outputs>
-                        <output id="51" name="Derived Column Output">
-                          <outputColumns>
-                            <outputColumn id="511" name="Subtotal" dataType="numeric" precision="12" scale="2" expression="(DT_NUMERIC,12,2)([Cantidad] * [PrecioUnitario])"/>
-                            <outputColumn id="512" name="IVA"      dataType="numeric" precision="12" scale="2" expression="(DT_NUMERIC,12,2)([Subtotal] * 0.16)"/>
-                            <outputColumn id="513" name="Total"    dataType="numeric" precision="12" scale="2" expression="(DT_NUMERIC,12,2)([Subtotal] + [IVA])"/>
-                          </outputColumns>
-                        </output>
-                      </outputs>
-                    </component>
-                    <component id="9" name="DST_FactVentas" componentClassID="Microsoft.OleDbDestination">
-                      <properties>
-                        <property name="OpenRowset">dbo.FactVentas</property>
-                        <property name="AccessMode">3</property>
-                      </properties>
-                      <connections><connection id="91" connectionManagerID="CM_DWUTVTVentas"/></connections>
-                    </component>
-                  </components>
-                </pipeline>
-              </DTS:ObjectData>
-            </DTS:Executable>
-          </DTS:Executables>
-        </DTS:Executable>
-
-        <!-- 5. Execute SQL: Registrar estadísticas finales en LogProceso -->
-        <DTS:Executable DTS:ExecutableType="Microsoft.ExecuteSQLTask"
-                        DTS:TaskName="SQL_RegistrarEstadisticas"
-                        DTS:DTSID="{AAAA0040-0000-0000-0000-000000000040}">
-          <DTS:ObjectData>
-            <SQLTask:SqlTaskData
-              xmlns:SQLTask="www.microsoft.com/sqlserver/dts/tasks/sqltask"
-              SQLTask:Connection="CM_DWUTVTVentas"
-              SQLTask:SqlStatementSource="UPDATE dbo.LogProceso
-SET FechaFin          = GETDATE(),
-    DuracionSegundos  = DATEDIFF(SECOND, FechaInicio, GETDATE()),
-    TotalLeidos       = ?,
-    TotalInsertados   = ?,
-    TotalErrores      = ?,
-    Estatus           = 'EXITOSO',
-    Mensaje           = 'Proceso completado correctamente'
-WHERE IdProceso = ?;">
-              <SQLTask:ParameterBinding SQLTask:ParameterName="0" SQLTask:DtsVariableName="User::TotalLeidos"     SQLTask:Direction="Input" SQLTask:DataType="3"/>
-              <SQLTask:ParameterBinding SQLTask:ParameterName="1" SQLTask:DtsVariableName="User::TotalInsertados" SQLTask:Direction="Input" SQLTask:DataType="3"/>
-              <SQLTask:ParameterBinding SQLTask:ParameterName="2" SQLTask:DtsVariableName="User::TotalErrores"    SQLTask:Direction="Input" SQLTask:DataType="3"/>
-              <SQLTask:ParameterBinding SQLTask:ParameterName="3" SQLTask:DtsVariableName="User::IdProcesoLog"    SQLTask:Direction="Input" SQLTask:DataType="3"/>
-            </SQLTask:SqlTaskData>
-          </DTS:ObjectData>
-        </DTS:Executable>
-
-        <!-- 6. Sequence Container: Post-Proceso (Mover y Comprimir) -->
-        <DTS:Executable DTS:ExecutableType="SSIS.Sequence.3"
-                        DTS:TaskName="SEQ_PostProceso"
-                        DTS:DTSID="{AAAA0050-0000-0000-0000-000000000050}">
-          <DTS:Executables>
-
-            <!-- File System Task: Mover Clientes.csv a Procesados -->
-            <DTS:Executable DTS:ExecutableType="Microsoft.FileSystemTask"
-                            DTS:TaskName="FST_MoverClientes"
-                            DTS:DTSID="{AAAA0051-0000-0000-0000-000000000051}">
-              <DTS:ObjectData>
-                <FileSystemData FileSystemData_Operation="6"
-                                FileSystemData_OverwriteDestination="True"
-                                FileSystemData_IsSourcePathVariable="True"
-                                FileSystemData_Source="User::RutaEntrada"
-                                FileSystemData_IsDestinationPathVariable="True"
-                                FileSystemData_Destination="User::RutaProcesado"/>
-              </DTS:ObjectData>
-            </DTS:Executable>
-
-            <!-- File System Task: Mover Productos.csv -->
-            <DTS:Executable DTS:ExecutableType="Microsoft.FileSystemTask"
-                            DTS:TaskName="FST_MoverProductos"
-                            DTS:DTSID="{AAAA0052-0000-0000-0000-000000000052}">
-            </DTS:Executable>
-
-            <!-- File System Task: Mover Ventas.csv -->
-            <DTS:Executable DTS:ExecutableType="Microsoft.FileSystemTask"
-                            DTS:TaskName="FST_MoverVentas"
-                            DTS:DTSID="{AAAA0053-0000-0000-0000-000000000053}">
-            </DTS:Executable>
-
-            <!-- Execute Process Task: Comprimir archivos con PowerShell -->
-            <!--
-              PowerShell command (parametrizado con FechaProceso):
-              Compress-Archive -Path "C:\...\procesados\*"
-                               -DestinationPath "C:\...\procesados\Procesados_YYYYMMDD_HHMMSS.zip"
-            -->
-            <DTS:Executable DTS:ExecutableType="Microsoft.ExecuteProcess"
-                            DTS:TaskName="EPT_ComprimirArchivos"
-                            DTS:DTSID="{AAAA0054-0000-0000-0000-000000000054}">
-              <DTS:ObjectData>
-                <ExecuteProcessData>
-                  <Executable>powershell.exe</Executable>
-                  <Arguments>-NoProfile -NonInteractive -Command "$fecha = Get-Date -Format 'yyyyMMdd_HHmmss'; Compress-Archive -Path '@[User::RutaProcesado]*' -DestinationPath ('@[User::RutaProcesado]Procesados_' + $fecha + '.zip') -Force"</Arguments>
-                  <WorkingDirectory></WorkingDirectory>
-                  <TimeOut>120</TimeOut>
-                  <TerminateProcessAfterTimeOut>False</TerminateProcessAfterTimeOut>
-                  <WindowStyle>1</WindowStyle>
-                  <StandardInputVariable></StandardInputVariable>
-                  <StandardOutputVariable></StandardOutputVariable>
-                  <StandardErrorVariable></StandardErrorVariable>
-                  <RequireFullFileName>True</RequireFullFileName>
-                  <SuccessValue>0</SuccessValue>
-                </ExecuteProcessData>
-              </DTS:ObjectData>
-            </DTS:Executable>
-
-          </DTS:Executables>
-        </DTS:Executable>
-
-      </DTS:Executables>
-
-      <!-- Precedence Constraints (orden de ejecución) -->
-      <DTS:PrecedenceConstraints>
-        <DTS:PrecedenceConstraint DTS:From="SQL_RegistrarInicio"      DTS:To="SEQ_CargaClientes"       DTS:EvalOp="1"/>
-        <DTS:PrecedenceConstraint DTS:From="SEQ_CargaClientes"        DTS:To="SEQ_CargaProductos"      DTS:EvalOp="1"/>
-        <DTS:PrecedenceConstraint DTS:From="SEQ_CargaProductos"       DTS:To="SEQ_CargaVentas"         DTS:EvalOp="1"/>
-        <DTS:PrecedenceConstraint DTS:From="SEQ_CargaVentas"          DTS:To="SQL_RegistrarEstadisticas" DTS:EvalOp="1"/>
-        <DTS:PrecedenceConstraint DTS:From="SQL_RegistrarEstadisticas" DTS:To="SEQ_PostProceso"          DTS:EvalOp="1"/>
-      </DTS:PrecedenceConstraints>
-
-    </DTS:Executable>
-  </DTS:Executables>
-
-  <!-- ============================================================ -->
-  <!-- CONNECTION MANAGERS                                           -->
-  <!-- ============================================================ -->
+﻿<?xml version="1.0"?>
+<DTS:Executable xmlns:DTS="www.microsoft.com/SqlServer/Dts"
+  DTS:refId="Package"
+  DTS:CreationDate="7/3/2026 6:50:25 AM"
+  DTS:CreationName="Microsoft.Package"
+  DTS:CreatorComputerName="DESKTOP-N6EERLJ"
+  DTS:CreatorName="DESKTOP-N6EERLJ\Jaime"
+  DTS:DTSID="{8C9F7894-CDAF-4018-BA33-CDED26F8C3D2}"
+  DTS:ExecutableType="Microsoft.Package"
+  DTS:LastModifiedProductVersion="17.0.1016.0"
+  DTS:LocaleID="2058"
+  DTS:ObjectName="CargaVentas"
+  DTS:PackageType="5"
+  DTS:VersionBuild="38"
+  DTS:VersionGUID="{10FE8A39-48DF-4450-9687-6D1AA53B4443}">
+  <DTS:Property
+    DTS:Name="PackageFormatVersion">8</DTS:Property>
   <DTS:ConnectionManagers>
-    <!-- OLE DB: SQL Server DWUTVTVentas -->
-    <DTS:ConnectionManager DTS:Name="CM_DWUTVTVentas"
-                           DTS:DTSID="{CCCC0001-0000-0000-0000-000000000001}"
-                           DTS:CreationName="OLEDB">
+    <DTS:ConnectionManager
+      DTS:refId="Package.ConnectionManagers[Administrador de conexiones de archivos planos]"
+      DTS:CreationName="FLATFILE"
+      DTS:DTSID="{AA494A8B-4999-4505-B707-F64A727C70D3}"
+      DTS:ObjectName="Administrador de conexiones de archivos planos">
       <DTS:ObjectData>
-        <DTS:ConnectionManager DTS:ConnectionString="Provider=SQLNCLI11;Server=localhost;Database=DWUTVTVentas;Integrated Security=SSPI;"/>
-      </DTS:ObjectData>
-    </DTS:ConnectionManager>
-    <!-- Flat File: Clientes.csv -->
-    <DTS:ConnectionManager DTS:Name="CM_FF_Clientes"
-                           DTS:DTSID="{CCCC0002-0000-0000-0000-000000000002}"
-                           DTS:CreationName="FLATFILE">
-      <DTS:ObjectData>
-        <DTS:ConnectionManager DTS:Format="Delimited"
-                               DTS:ColumnNamesInFirstDataRow="True"
-                               DTS:HeaderRowDelimiter="\r\n"
-                               DTS:RowDelimiter="\r\n"
-                               DTS:TextQualifier="&quot;"
-                               DTS:CodePage="65001"
-                               DTS:ConnectionString="C:\Proyecto_ETL_UTVT\data\entrada\Clientes.csv">
+        <DTS:ConnectionManager
+          DTS:Format="Delimited"
+          DTS:LocaleID="2058"
+          DTS:HeaderRowDelimiter="_x000D__x000A_"
+          DTS:ColumnNamesInFirstDataRow="True"
+          DTS:RowDelimiter=""
+          DTS:TextQualifier="_x003C_none_x003E_"
+          DTS:CodePage="65001"
+          DTS:ConnectionString="C:\Proyecto_ETL_UTVT\data\entrada\Clientes.csv">
           <DTS:FlatFileColumns>
-            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="4"  DTS:MaximumWidth="50"  DTS:Name="IdCliente"/>
-            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="129" DTS:MaximumWidth="100" DTS:Name="Nombre"/>
-            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="129" DTS:MaximumWidth="100" DTS:Name="Apellido"/>
-            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="129" DTS:MaximumWidth="150" DTS:Name="Correo"/>
-            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="129" DTS:MaximumWidth="20"  DTS:Name="Telefono"/>
-            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="129" DTS:MaximumWidth="100" DTS:Name="Ciudad"/>
-            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="129" DTS:MaximumWidth="100" DTS:Name="Estado"/>
-            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="129" DTS:MaximumWidth="100" DTS:Name="Pais"/>
-            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="4"  DTS:MaximumWidth="10"  DTS:Name="Activo"/>
-            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="\r\n" DTS:DataType="129" DTS:MaximumWidth="20" DTS:Name="FechaRegistro"/>
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="IdCliente"
+              DTS:DTSID="{B8008D77-F57B-4F32-8920-3308A9D62768}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="Nombre"
+              DTS:DTSID="{2777B5D0-4D3B-4327-9882-37B283E999AB}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="Apellido"
+              DTS:DTSID="{605A3D24-E30A-4C50-BDE5-FDF56B5BA68F}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="Correo"
+              DTS:DTSID="{5D8688EF-81A1-45B7-92AC-9A7374511506}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="Telefono"
+              DTS:DTSID="{115646C0-D5C7-44BC-BB17-3082354BD4E4}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="Ciudad"
+              DTS:DTSID="{CD9B8D4C-80B5-4725-809A-9AD7EF9982EA}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="Estado"
+              DTS:DTSID="{9F2A9408-75A4-4B7C-8875-1869B67E604A}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="Pais"
+              DTS:DTSID="{C62D26B5-71A9-41D0-A72F-B851CE12CE1D}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="Activo"
+              DTS:DTSID="{E5FBE266-97B0-4FF3-B1A6-AB1649A37F27}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x000D__x000A_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="FechaRegistro"
+              DTS:DTSID="{93FB7721-CB72-4C63-AE78-BDE6039EE05A}"
+              DTS:CreationName="" />
           </DTS:FlatFileColumns>
         </DTS:ConnectionManager>
       </DTS:ObjectData>
     </DTS:ConnectionManager>
-    <!-- Flat File: Productos.csv -->
-    <DTS:ConnectionManager DTS:Name="CM_FF_Productos"
-                           DTS:DTSID="{CCCC0003-0000-0000-0000-000000000003}"
-                           DTS:CreationName="FLATFILE">
+    <DTS:ConnectionManager
+      DTS:refId="Package.ConnectionManagers[Conn1]"
+      DTS:CreationName="FLATFILE"
+      DTS:DTSID="{944E5FD7-3910-42EB-8DD4-179B7357B6B9}"
+      DTS:ObjectName="Conn1">
       <DTS:ObjectData>
-        <DTS:ConnectionManager DTS:Format="Delimited"
-                               DTS:ColumnNamesInFirstDataRow="True"
-                               DTS:RowDelimiter="\r\n"
-                               DTS:TextQualifier="&quot;"
-                               DTS:CodePage="65001"
-                               DTS:ConnectionString="C:\Proyecto_ETL_UTVT\data\entrada\Productos.csv">
+        <DTS:ConnectionManager
+          DTS:Format="Delimited"
+          DTS:LocaleID="2058"
+          DTS:HeaderRowDelimiter="_x000D__x000A_"
+          DTS:ColumnNamesInFirstDataRow="True"
+          DTS:RowDelimiter=""
+          DTS:TextQualifier="_x003C_none_x003E_"
+          DTS:CodePage="65001"
+          DTS:ConnectionString="C:\Proyecto_ETL_UTVT\data\entrada\Clientes.csv">
           <DTS:FlatFileColumns>
-            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="4"  DTS:MaximumWidth="50"  DTS:Name="IdProducto"/>
-            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="129" DTS:MaximumWidth="150" DTS:Name="NombreProducto"/>
-            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="129" DTS:MaximumWidth="100" DTS:Name="Categoria"/>
-            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="5"  DTS:MaximumWidth="20"  DTS:Name="Precio"/>
-            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="5"  DTS:MaximumWidth="20"  DTS:Name="Costo"/>
-            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="\r\n" DTS:DataType="4" DTS:MaximumWidth="5" DTS:Name="Activo"/>
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="IdCliente"
+              DTS:DTSID="{27864664-9646-4DB2-BD48-B5865C8A4B4A}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="Nombre"
+              DTS:DTSID="{866407DA-8A4B-4FEC-B0BD-4D81BE352F19}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="Apellido"
+              DTS:DTSID="{539999E0-D9EF-4DBC-8B23-DAB5D4C7DE86}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="Correo"
+              DTS:DTSID="{2750300B-E18F-4FE1-81CB-49CF5804A8A6}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="20"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="Telefono"
+              DTS:DTSID="{05A8445C-87F0-458B-B75F-4E50047F0B69}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="Ciudad"
+              DTS:DTSID="{A553F42F-8189-4914-BC5D-2602BC215163}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="Estado"
+              DTS:DTSID="{9FBDDAEE-CAC3-4D2A-B23C-2F0AAD6976B1}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="Pais"
+              DTS:DTSID="{FF004A9A-A032-4E61-A146-FD46455DE663}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="Activo"
+              DTS:DTSID="{847DCC93-80C9-4439-B4E7-46F2CC191BBF}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x000D__x000A_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="FechaRegistro"
+              DTS:DTSID="{7FB61748-D087-4A37-BE03-39F0A44DEB7F}"
+              DTS:CreationName="" />
           </DTS:FlatFileColumns>
         </DTS:ConnectionManager>
       </DTS:ObjectData>
     </DTS:ConnectionManager>
-    <!-- Flat File: Ventas.csv -->
-    <DTS:ConnectionManager DTS:Name="CM_FF_Ventas"
-                           DTS:DTSID="{CCCC0004-0000-0000-0000-000000000004}"
-                           DTS:CreationName="FLATFILE">
+    <DTS:ConnectionManager
+      DTS:refId="Package.ConnectionManagers[DESKTOP-812BAG9.DWUTVTVentas]"
+      DTS:CreationName="OLEDB"
+      DTS:DTSID="{7F0D7B4A-7C46-4605-A96C-D7E2118A26CB}"
+      DTS:ObjectName="DESKTOP-812BAG9.DWUTVTVentas">
       <DTS:ObjectData>
-        <DTS:ConnectionManager DTS:Format="Delimited"
-                               DTS:ColumnNamesInFirstDataRow="True"
-                               DTS:RowDelimiter="\r\n"
-                               DTS:TextQualifier="&quot;"
-                               DTS:CodePage="65001"
-                               DTS:ConnectionString="C:\Proyecto_ETL_UTVT\data\entrada\Ventas.csv">
-          <DTS:FlatFileColumns>
-            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="4"  DTS:MaximumWidth="50"  DTS:Name="IdVenta"/>
-            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="4"  DTS:MaximumWidth="50"  DTS:Name="IdCliente"/>
-            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="4"  DTS:MaximumWidth="50"  DTS:Name="IdProducto"/>
-            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="4"  DTS:MaximumWidth="20"  DTS:Name="Cantidad"/>
-            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="5"  DTS:MaximumWidth="20"  DTS:Name="PrecioUnitario"/>
-            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="129" DTS:MaximumWidth="20" DTS:Name="FechaVenta"/>
-            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="\r\n" DTS:DataType="129" DTS:MaximumWidth="100" DTS:Name="Sucursal"/>
-          </DTS:FlatFileColumns>
-        </DTS:ConnectionManager>
+        <DTS:ConnectionManager
+          DTS:ConnectRetryCount="1"
+          DTS:ConnectRetryInterval="5"
+          DTS:ConnectionString="Data Source=DESKTOP-812BAG9;Initial Catalog=DWUTVTVentas;Provider=SQLOLEDB.1;Integrated Security=SSPI;Application Name=SSIS-CargaVentas-{7F0D7B4A-7C46-4605-A96C-D7E2118A26CB}DESKTOP-812BAG9.DWUTVTVentas;Auto Translate=False;" />
       </DTS:ObjectData>
     </DTS:ConnectionManager>
-    <!-- Flat File: Errores Clientes -->
-    <DTS:ConnectionManager DTS:Name="CM_FF_ErroresClientes"
-                           DTS:DTSID="{CCCC0005-0000-0000-0000-000000000005}"
-                           DTS:CreationName="FLATFILE">
+    <DTS:ConnectionManager
+      DTS:refId="Package.ConnectionManagers[DESKTOP-N6EERLJ.DWUTVTVentas]"
+      DTS:CreationName="OLEDB"
+      DTS:DTSID="{6280D757-A32B-4AD2-B741-1509C54E9A98}"
+      DTS:ObjectName="DESKTOP-N6EERLJ.DWUTVTVentas">
       <DTS:ObjectData>
-        <DTS:ConnectionManager DTS:Format="Delimited"
-                               DTS:ColumnNamesInFirstDataRow="True"
-                               DTS:CodePage="65001"
-                               DTS:ConnectionString="C:\Proyecto_ETL_UTVT\data\errores\Errores_Clientes.csv"/>
+        <DTS:ConnectionManager
+          DTS:ConnectRetryCount="1"
+          DTS:ConnectRetryInterval="5"
+          DTS:ConnectionString="Data Source=DESKTOP-812BAG9;Initial Catalog=DWUTVTVentas;Provider=SQLOLEDB.1;Integrated Security=SSPI;Auto Translate=False;Application Name=SSIS-CargaVentas-{6280D757-A32B-4AD2-B741-1509C54E9A98}DESKTOP-N6EERLJ.DWUTVTVentas;" />
+      </DTS:ObjectData>
+    </DTS:ConnectionManager>
+    <DTS:ConnectionManager
+      DTS:refId="Package.ConnectionManagers[Flat File Connection Manager]"
+      DTS:CreationName="FLATFILE"
+      DTS:DTSID="{8E10FA44-340E-4192-8B3D-6CDE957BF98D}"
+      DTS:ObjectName="Flat File Connection Manager">
+      <DTS:ObjectData>
+        <DTS:ConnectionManager
+          DTS:Format="Delimited"
+          DTS:LocaleID="2058"
+          DTS:HeaderRowDelimiter="_x000D__x000A_"
+          DTS:ColumnNamesInFirstDataRow="True"
+          DTS:RowDelimiter=""
+          DTS:TextQualifier="_x003C_none_x003E_"
+          DTS:CodePage="1252"
+          DTS:ConnectionString="C:\Proyecto_ETL_UTVT\data\errores\Errores_Clientes.csv">
+          <DTS:FlatFileColumns>
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="IdCliente"
+              DTS:DTSID="{2D3D78CF-23FA-4655-8B54-BDA46D4C37E3}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="Nombre"
+              DTS:DTSID="{1657CAC4-FD13-4FB5-BE82-4EA22B936474}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="Apellido"
+              DTS:DTSID="{B77EAF0B-5A3B-4931-9903-F366A89231DB}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="Correo"
+              DTS:DTSID="{C23545DE-9EEE-40C4-91C8-D735A51D49CA}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="Telefono"
+              DTS:DTSID="{2B478B4A-EEA9-494B-B0A7-AAC6F644AE24}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="Ciudad"
+              DTS:DTSID="{A67B93A7-1588-459A-9D45-A7A08A718E12}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="Estado"
+              DTS:DTSID="{301197A7-8D6C-4D52-920F-D09F40EC8FB9}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="Pais"
+              DTS:DTSID="{11218258-9EE4-40F7-88E0-C0CA81CE8ACD}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="Activo"
+              DTS:DTSID="{EDC6A8F9-B523-4620-85BB-467FEC5852FE}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:MaximumWidth="50"
+              DTS:DataType="129"
+              DTS:TextQualified="True"
+              DTS:ObjectName="FechaRegistro"
+              DTS:DTSID="{BC6DD7F5-7CAD-418C-8189-C96F08E2EBFC}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x002C_"
+              DTS:DataType="3"
+              DTS:TextQualified="True"
+              DTS:ObjectName="ErrorCode"
+              DTS:DTSID="{15CD7CFF-19EB-4B70-B6F4-919CC6634677}"
+              DTS:CreationName="" />
+            <DTS:FlatFileColumn
+              DTS:ColumnType="Delimited"
+              DTS:ColumnDelimiter="_x000D__x000A_"
+              DTS:DataType="3"
+              DTS:TextQualified="True"
+              DTS:ObjectName="ErrorColumn"
+              DTS:DTSID="{05FFA761-3DA3-425C-87DA-77E9B12ACE61}"
+              DTS:CreationName="" />
+          </DTS:FlatFileColumns>
+        </DTS:ConnectionManager>
       </DTS:ObjectData>
     </DTS:ConnectionManager>
   </DTS:ConnectionManagers>
-
+  <DTS:Variables>
+    <DTS:Variable
+      DTS:CreationName=""
+      DTS:DTSID="{EE6F1F72-64E9-4553-B609-D5A283FE9A90}"
+      DTS:EvaluateAsExpression="True"
+      DTS:Expression="&quot;C:\\Proyecto_ETL_UTVT\\data\\entrada\\Clientes.csv&quot;"
+      DTS:IncludeInDebugDump="2345"
+      DTS:Namespace="User"
+      DTS:ObjectName="ArchivoClientes">
+      <DTS:VariableValue
+        DTS:DataType="8">C:\Proyecto_ETL_UTVT\data\entrada\Clientes.csv</DTS:VariableValue>
+    </DTS:Variable>
+    <DTS:Variable
+      DTS:CreationName=""
+      DTS:DTSID="{8D2A9926-DA7E-4C91-BA8A-FE883BC49226}"
+      DTS:EvaluateAsExpression="True"
+      DTS:Expression="&quot;C:\\Proyecto_ETL_UTVT\\data\\entrada\\Productos.csv&quot;"
+      DTS:IncludeInDebugDump="2345"
+      DTS:Namespace="User"
+      DTS:ObjectName="ArchivoProductos">
+      <DTS:VariableValue
+        DTS:DataType="8">C:\Proyecto_ETL_UTVT\data\entrada\Productos.csv</DTS:VariableValue>
+    </DTS:Variable>
+    <DTS:Variable
+      DTS:CreationName=""
+      DTS:DTSID="{68F493A7-0FD6-4BC6-BCFA-E1F80E243F4C}"
+      DTS:EvaluateAsExpression="True"
+      DTS:Expression="&quot;C:\\Proyecto_ETL_UTVT\\data\\entrada\\Ventas.csv&quot;"
+      DTS:IncludeInDebugDump="2345"
+      DTS:Namespace="User"
+      DTS:ObjectName="ArchivoVentas">
+      <DTS:VariableValue
+        DTS:DataType="8">C:\Proyecto_ETL_UTVT\data\entrada\Ventas.csv</DTS:VariableValue>
+    </DTS:Variable>
+    <DTS:Variable
+      DTS:CreationName=""
+      DTS:DTSID="{0958A46C-2B8A-4465-85F2-C7FA005F3F0C}"
+      DTS:IncludeInDebugDump="2345"
+      DTS:Namespace="User"
+      DTS:ObjectName="FechaProceso">
+      <DTS:VariableValue
+        DTS:DataType="7">7/3/2026 6:59:45 AM</DTS:VariableValue>
+    </DTS:Variable>
+    <DTS:Variable
+      DTS:CreationName=""
+      DTS:DTSID="{436D7151-589B-4EA6-9D25-F26A13506600}"
+      DTS:IncludeInDebugDump="2345"
+      DTS:Namespace="User"
+      DTS:ObjectName="NombreZip">
+      <DTS:VariableValue
+        DTS:DataType="8"
+        xml:space="preserve"></DTS:VariableValue>
+    </DTS:Variable>
+    <DTS:Variable
+      DTS:CreationName=""
+      DTS:DTSID="{8F53D6FE-DD5C-463D-9208-62A0334B8CC9}"
+      DTS:EvaluateAsExpression="True"
+      DTS:Expression="&quot;C:\\Proyecto_ETL_UTVT\\data\\entrada\\&quot;"
+      DTS:IncludeInDebugDump="2345"
+      DTS:Namespace="User"
+      DTS:ObjectName="RutaEntrada">
+      <DTS:VariableValue
+        DTS:DataType="8">C:\Proyecto_ETL_UTVT\data\entrada\</DTS:VariableValue>
+    </DTS:Variable>
+    <DTS:Variable
+      DTS:CreationName=""
+      DTS:DTSID="{110027C4-13E6-4FD7-B317-45100FCA3FE4}"
+      DTS:EvaluateAsExpression="True"
+      DTS:Expression="&quot;C:\\Proyecto_ETL_UTVT\\data\\errores\\&quot;"
+      DTS:IncludeInDebugDump="2345"
+      DTS:Namespace="User"
+      DTS:ObjectName="RutaErrores">
+      <DTS:VariableValue
+        DTS:DataType="8">C:\Proyecto_ETL_UTVT\data\errores\</DTS:VariableValue>
+    </DTS:Variable>
+    <DTS:Variable
+      DTS:CreationName=""
+      DTS:DTSID="{11414C8C-DEBE-4B5F-AFFF-F271F9339B0C}"
+      DTS:EvaluateAsExpression="True"
+      DTS:Expression="&quot;C:\\Proyecto_ETL_UTVT\\data\\procesados\\&quot;"
+      DTS:IncludeInDebugDump="2345"
+      DTS:Namespace="User"
+      DTS:ObjectName="RutaProcesado">
+      <DTS:VariableValue
+        DTS:DataType="8">C:\Proyecto_ETL_UTVT\data\procesados\</DTS:VariableValue>
+    </DTS:Variable>
+    <DTS:Variable
+      DTS:CreationName=""
+      DTS:DTSID="{2879D6AB-2A50-499E-9A24-2C84BB9E8B88}"
+      DTS:IncludeInDebugDump="2345"
+      DTS:Namespace="User"
+      DTS:ObjectName="TotalErrores">
+      <DTS:VariableValue
+        DTS:DataType="3">0</DTS:VariableValue>
+    </DTS:Variable>
+    <DTS:Variable
+      DTS:CreationName=""
+      DTS:DTSID="{EDA3107D-7B70-410E-A7D8-5C6093BF8CC2}"
+      DTS:IncludeInDebugDump="2345"
+      DTS:Namespace="User"
+      DTS:ObjectName="TotalInsertados">
+      <DTS:VariableValue
+        DTS:DataType="3">0</DTS:VariableValue>
+    </DTS:Variable>
+    <DTS:Variable
+      DTS:CreationName=""
+      DTS:DTSID="{1EF85D17-B247-49CF-91BF-50523B908A94}"
+      DTS:IncludeInDebugDump="2345"
+      DTS:Namespace="User"
+      DTS:ObjectName="TotalLeidos">
+      <DTS:VariableValue
+        DTS:DataType="3">0</DTS:VariableValue>
+    </DTS:Variable>
+  </DTS:Variables>
+  <DTS:Executables>
+    <DTS:Executable
+      DTS:refId="Package\ETL Clientes"
+      DTS:CreationName="Microsoft.Pipeline"
+      DTS:Description="Tarea Flujo de datos"
+      DTS:DTSID="{B1EC7E17-66A5-4A60-9F13-800D20DE0C51}"
+      DTS:ExecutableType="Microsoft.Pipeline"
+      DTS:LocaleID="-1"
+      DTS:ObjectName="ETL Clientes"
+      DTS:TaskContact="Performs high-performance data extraction, transformation and loading;Microsoft Corporation; Microsoft SQL Server; (C) Microsoft Corporation; All Rights Reserved;http://www.microsoft.com/sql/support/default.asp;1">
+      <DTS:Variables />
+      <DTS:ObjectData>
+        <pipeline
+          version="1">
+          <components>
+            <component
+              refId="Package\ETL Clientes\Columna derivada"
+              componentClassID="Microsoft.DerivedColumn"
+              contactInfo="Columna derivada;Microsoft Corporation; Microsoft SQL Server; (C) Microsoft Corporation; Todos los derechos reservados; http://www.microsoft.com/sql/support;0"
+              description="Crea nuevos valores de columna aplicando expresiones a las columnas de entrada de la transformación. Crea nuevas columnas o sobrescribe las columnas existentes. Por ejemplo, se concatenan los valores de las columnas 'nombre' y 'apellidos' para crear una columna 'nombre completo'."
+              name="Columna derivada"
+              usesDispositions="true">
+              <inputs>
+                <input
+                  refId="Package\ETL Clientes\Columna derivada.Inputs[Entrada de columna derivada]"
+                  description="Entrada en la transformación Columna derivada"
+                  name="Entrada de columna derivada">
+                  <inputColumns>
+                    <inputColumn
+                      refId="Package\ETL Clientes\Columna derivada.Inputs[Entrada de columna derivada].Columns[Nombre]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Nombre"
+                      errorOrTruncationOperation="Cálculo"
+                      errorRowDisposition="FailComponent"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Nombre]"
+                      truncationRowDisposition="FailComponent"
+                      usageType="readWrite">
+                      <properties>
+                        <property
+                          containsID="true"
+                          dataType="System.String"
+                          description="Expresión de columna derivada"
+                          name="Expression">[UPPER]([TRIM](#{Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Nombre]}))</property>
+                        <property
+                          containsID="true"
+                          dataType="System.String"
+                          description="Expresión descriptiva de columna derivada"
+                          expressionType="Notify"
+                          name="FriendlyExpression">UPPER(TRIM(Nombre))</property>
+                      </properties>
+                    </inputColumn>
+                    <inputColumn
+                      refId="Package\ETL Clientes\Columna derivada.Inputs[Entrada de columna derivada].Columns[Apellido]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Apellido"
+                      errorOrTruncationOperation="Cálculo"
+                      errorRowDisposition="FailComponent"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Apellido]"
+                      truncationRowDisposition="FailComponent"
+                      usageType="readWrite">
+                      <properties>
+                        <property
+                          containsID="true"
+                          dataType="System.String"
+                          description="Expresión de columna derivada"
+                          name="Expression">[UPPER]([TRIM](#{Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Apellido]}))</property>
+                        <property
+                          containsID="true"
+                          dataType="System.String"
+                          description="Expresión descriptiva de columna derivada"
+                          expressionType="Notify"
+                          name="FriendlyExpression">UPPER(TRIM(Apellido))</property>
+                      </properties>
+                    </inputColumn>
+                    <inputColumn
+                      refId="Package\ETL Clientes\Columna derivada.Inputs[Entrada de columna derivada].Columns[Correo]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Correo"
+                      errorOrTruncationOperation="Cálculo"
+                      errorRowDisposition="FailComponent"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Correo]"
+                      truncationRowDisposition="FailComponent"
+                      usageType="readWrite">
+                      <properties>
+                        <property
+                          containsID="true"
+                          dataType="System.String"
+                          description="Expresión de columna derivada"
+                          name="Expression">[ISNULL](#{Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Correo]}) ? "SIN CORREO" : [TRIM](#{Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Correo]})</property>
+                        <property
+                          containsID="true"
+                          dataType="System.String"
+                          description="Expresión descriptiva de columna derivada"
+                          expressionType="Notify"
+                          name="FriendlyExpression">ISNULL(Correo) ? "SIN CORREO" : TRIM(Correo)</property>
+                      </properties>
+                    </inputColumn>
+                    <inputColumn
+                      refId="Package\ETL Clientes\Columna derivada.Inputs[Entrada de columna derivada].Columns[Telefono]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Telefono"
+                      errorOrTruncationOperation="Cálculo"
+                      errorRowDisposition="FailComponent"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Telefono]"
+                      truncationRowDisposition="FailComponent"
+                      usageType="readWrite">
+                      <properties>
+                        <property
+                          containsID="true"
+                          dataType="System.String"
+                          description="Expresión de columna derivada"
+                          name="Expression">[TRIM](#{Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Telefono]})</property>
+                        <property
+                          containsID="true"
+                          dataType="System.String"
+                          description="Expresión descriptiva de columna derivada"
+                          expressionType="Notify"
+                          name="FriendlyExpression">TRIM(Telefono)</property>
+                      </properties>
+                    </inputColumn>
+                    <inputColumn
+                      refId="Package\ETL Clientes\Columna derivada.Inputs[Entrada de columna derivada].Columns[Ciudad]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Ciudad"
+                      errorOrTruncationOperation="Cálculo"
+                      errorRowDisposition="FailComponent"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Ciudad]"
+                      truncationRowDisposition="FailComponent"
+                      usageType="readWrite">
+                      <properties>
+                        <property
+                          containsID="true"
+                          dataType="System.String"
+                          description="Expresión de columna derivada"
+                          name="Expression">[UPPER]([TRIM](#{Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Ciudad]}))</property>
+                        <property
+                          containsID="true"
+                          dataType="System.String"
+                          description="Expresión descriptiva de columna derivada"
+                          expressionType="Notify"
+                          name="FriendlyExpression">UPPER(TRIM(Ciudad))</property>
+                      </properties>
+                    </inputColumn>
+                    <inputColumn
+                      refId="Package\ETL Clientes\Columna derivada.Inputs[Entrada de columna derivada].Columns[Estado]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Estado"
+                      errorOrTruncationOperation="Cálculo"
+                      errorRowDisposition="FailComponent"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Estado]"
+                      truncationRowDisposition="FailComponent"
+                      usageType="readWrite">
+                      <properties>
+                        <property
+                          containsID="true"
+                          dataType="System.String"
+                          description="Expresión de columna derivada"
+                          name="Expression">[UPPER]([TRIM](#{Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Estado]}))</property>
+                        <property
+                          containsID="true"
+                          dataType="System.String"
+                          description="Expresión descriptiva de columna derivada"
+                          expressionType="Notify"
+                          name="FriendlyExpression">UPPER(TRIM(Estado))</property>
+                      </properties>
+                    </inputColumn>
+                    <inputColumn
+                      refId="Package\ETL Clientes\Columna derivada.Inputs[Entrada de columna derivada].Columns[Pais]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Pais"
+                      errorOrTruncationOperation="Cálculo"
+                      errorRowDisposition="FailComponent"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Pais]"
+                      truncationRowDisposition="FailComponent"
+                      usageType="readWrite">
+                      <properties>
+                        <property
+                          containsID="true"
+                          dataType="System.String"
+                          description="Expresión de columna derivada"
+                          name="Expression">[UPPER]([TRIM](#{Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Pais]}))</property>
+                        <property
+                          containsID="true"
+                          dataType="System.String"
+                          description="Expresión descriptiva de columna derivada"
+                          expressionType="Notify"
+                          name="FriendlyExpression">UPPER(TRIM(Pais))</property>
+                      </properties>
+                    </inputColumn>
+                    <inputColumn
+                      refId="Package\ETL Clientes\Columna derivada.Inputs[Entrada de columna derivada].Columns[Activo]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Activo"
+                      errorOrTruncationOperation="Cálculo"
+                      errorRowDisposition="FailComponent"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Activo]"
+                      truncationRowDisposition="FailComponent"
+                      usageType="readWrite">
+                      <properties>
+                        <property
+                          containsID="true"
+                          dataType="System.String"
+                          description="Expresión de columna derivada"
+                          name="Expression">#{Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Activo]}</property>
+                        <property
+                          containsID="true"
+                          dataType="System.String"
+                          description="Expresión descriptiva de columna derivada"
+                          expressionType="Notify"
+                          name="FriendlyExpression">Activo</property>
+                      </properties>
+                    </inputColumn>
+                    <inputColumn
+                      refId="Package\ETL Clientes\Columna derivada.Inputs[Entrada de columna derivada].Columns[FechaRegistro]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="FechaRegistro"
+                      errorOrTruncationOperation="Cálculo"
+                      errorRowDisposition="FailComponent"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[FechaRegistro]"
+                      truncationRowDisposition="FailComponent"
+                      usageType="readWrite">
+                      <properties>
+                        <property
+                          containsID="true"
+                          dataType="System.String"
+                          description="Expresión de columna derivada"
+                          name="Expression">[TRIM](#{Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[FechaRegistro]})</property>
+                        <property
+                          containsID="true"
+                          dataType="System.String"
+                          description="Expresión descriptiva de columna derivada"
+                          expressionType="Notify"
+                          name="FriendlyExpression">TRIM(FechaRegistro)</property>
+                      </properties>
+                    </inputColumn>
+                  </inputColumns>
+                  <externalMetadataColumns />
+                </input>
+              </inputs>
+              <outputs>
+                <output
+                  refId="Package\ETL Clientes\Columna derivada.Outputs[Salida de columna derivada]"
+                  description="Salida predeterminada de la transformación Columna derivada"
+                  exclusionGroup="1"
+                  name="Salida de columna derivada"
+                  synchronousInputId="Package\ETL Clientes\Columna derivada.Inputs[Entrada de columna derivada]">
+                  <externalMetadataColumns />
+                </output>
+                <output
+                  refId="Package\ETL Clientes\Columna derivada.Outputs[Salida de error de columna derivada]"
+                  description="Salida de error de la transformación Columna derivada"
+                  exclusionGroup="1"
+                  isErrorOut="true"
+                  name="Salida de error de columna derivada"
+                  synchronousInputId="Package\ETL Clientes\Columna derivada.Inputs[Entrada de columna derivada]">
+                  <outputColumns>
+                    <outputColumn
+                      refId="Package\ETL Clientes\Columna derivada.Outputs[Salida de error de columna derivada].Columns[ErrorCode]"
+                      dataType="i4"
+                      lineageId="Package\ETL Clientes\Columna derivada.Outputs[Salida de error de columna derivada].Columns[ErrorCode]"
+                      name="ErrorCode"
+                      specialFlags="1" />
+                    <outputColumn
+                      refId="Package\ETL Clientes\Columna derivada.Outputs[Salida de error de columna derivada].Columns[ErrorColumn]"
+                      dataType="i4"
+                      lineageId="Package\ETL Clientes\Columna derivada.Outputs[Salida de error de columna derivada].Columns[ErrorColumn]"
+                      name="ErrorColumn"
+                      specialFlags="2" />
+                  </outputColumns>
+                  <externalMetadataColumns />
+                </output>
+              </outputs>
+            </component>
+            <component
+              refId="Package\ETL Clientes\Conversión de datos"
+              componentClassID="Microsoft.DataConvert"
+              contactInfo="Conversión de datos;Microsoft Corporation; Microsoft SQL Server; (C) Microsoft Corporation; Todos los derechos reservados; http://www.microsoft.com/sql/support;0"
+              description="Conversión de datos"
+              name="Conversión de datos"
+              usesDispositions="true">
+              <inputs>
+                <input
+                  refId="Package\ETL Clientes\Conversión de datos.Inputs[Entrada de conversión de datos]"
+                  name="Entrada de conversión de datos">
+                  <inputColumns>
+                    <inputColumn
+                      refId="Package\ETL Clientes\Conversión de datos.Inputs[Entrada de conversión de datos].Columns[IdCliente]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="IdCliente"
+                      cachedSortKeyPosition="1"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[IdCliente]" />
+                    <inputColumn
+                      refId="Package\ETL Clientes\Conversión de datos.Inputs[Entrada de conversión de datos].Columns[FechaRegistro]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="FechaRegistro"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[FechaRegistro]" />
+                  </inputColumns>
+                  <externalMetadataColumns />
+                </input>
+              </inputs>
+              <outputs>
+                <output
+                  refId="Package\ETL Clientes\Conversión de datos.Outputs[Salida de conversión de datos]"
+                  exclusionGroup="1"
+                  name="Salida de conversión de datos"
+                  synchronousInputId="Package\ETL Clientes\Conversión de datos.Inputs[Entrada de conversión de datos]">
+                  <outputColumns>
+                    <outputColumn
+                      refId="Package\ETL Clientes\Conversión de datos.Outputs[Salida de conversión de datos].Columns[IdCliente_Int]"
+                      dataType="i4"
+                      errorOrTruncationOperation="Conversión"
+                      errorRowDisposition="RedirectRow"
+                      lineageId="Package\ETL Clientes\Conversión de datos.Outputs[Salida de conversión de datos].Columns[IdCliente_Int]"
+                      name="IdCliente_Int"
+                      truncationRowDisposition="RedirectRow">
+                      <properties>
+                        <property
+                          containsID="true"
+                          dataType="System.Int32"
+                          description="Especifica la columna de entrada usada como origen de datos para la conversión."
+                          name="SourceInputColumnLineageID">#{Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[IdCliente]}</property>
+                        <property
+                          dataType="System.Boolean"
+                          description="Indica si la columna usa las rutinas de análisis más rápidas independientes de la configuración regional."
+                          name="FastParse">false</property>
+                      </properties>
+                    </outputColumn>
+                    <outputColumn
+                      refId="Package\ETL Clientes\Conversión de datos.Outputs[Salida de conversión de datos].Columns[FechaRegistro_Date]"
+                      dataType="dbDate"
+                      errorOrTruncationOperation="Conversión"
+                      errorRowDisposition="RedirectRow"
+                      lineageId="Package\ETL Clientes\Conversión de datos.Outputs[Salida de conversión de datos].Columns[FechaRegistro_Date]"
+                      name="FechaRegistro_Date"
+                      truncationRowDisposition="RedirectRow">
+                      <properties>
+                        <property
+                          containsID="true"
+                          dataType="System.Int32"
+                          description="Especifica la columna de entrada usada como origen de datos para la conversión."
+                          name="SourceInputColumnLineageID">#{Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[FechaRegistro]}</property>
+                        <property
+                          dataType="System.Boolean"
+                          description="Indica si la columna usa las rutinas de análisis más rápidas independientes de la configuración regional."
+                          name="FastParse">false</property>
+                      </properties>
+                    </outputColumn>
+                  </outputColumns>
+                  <externalMetadataColumns />
+                </output>
+                <output
+                  refId="Package\ETL Clientes\Conversión de datos.Outputs[Salida de error de conversión de datos]"
+                  exclusionGroup="1"
+                  isErrorOut="true"
+                  name="Salida de error de conversión de datos"
+                  synchronousInputId="Package\ETL Clientes\Conversión de datos.Inputs[Entrada de conversión de datos]">
+                  <outputColumns>
+                    <outputColumn
+                      refId="Package\ETL Clientes\Conversión de datos.Outputs[Salida de error de conversión de datos].Columns[ErrorCode]"
+                      dataType="i4"
+                      lineageId="Package\ETL Clientes\Conversión de datos.Outputs[Salida de error de conversión de datos].Columns[ErrorCode]"
+                      name="ErrorCode"
+                      specialFlags="1" />
+                    <outputColumn
+                      refId="Package\ETL Clientes\Conversión de datos.Outputs[Salida de error de conversión de datos].Columns[ErrorColumn]"
+                      dataType="i4"
+                      lineageId="Package\ETL Clientes\Conversión de datos.Outputs[Salida de error de conversión de datos].Columns[ErrorColumn]"
+                      name="ErrorColumn"
+                      specialFlags="2" />
+                  </outputColumns>
+                  <externalMetadataColumns />
+                </output>
+              </outputs>
+            </component>
+            <component
+              refId="Package\ETL Clientes\Destino de archivo plano"
+              componentClassID="Microsoft.FlatFileDestination"
+              contactInfo="Destino de archivo plano;Microsoft Corporation; Microsoft SQL Server; (C) Microsoft Corporation; Todos los derechos reservados; http://www.microsoft.com/sql/support;1"
+              description="Destino de archivo plano"
+              localeId="2058"
+              name="Destino de archivo plano"
+              version="1">
+              <properties>
+                <property
+                  dataType="System.Boolean"
+                  description="Especifica si los datos sobrescriben el archivo de destino o se anexan al mismo."
+                  name="Overwrite">true</property>
+                <property
+                  dataType="System.Null"
+                  description="Especifica el texto para escribir en el archivo de destino antes de escribir ningún dato."
+                  expressionType="Notify"
+                  name="Header" />
+                <property
+                  dataType="System.Boolean"
+                  description="Cuando el calificador de texto está habilitado, especifica si este contendrá secuencias de escape o no en los datos escritos en el archivo de destino."
+                  name="EscapeQualifier">false</property>
+              </properties>
+              <connections>
+                <connection
+                  refId="Package\ETL Clientes\Destino de archivo plano.Connections[FlatFileConnection]"
+                  connectionManagerID="Package.ConnectionManagers[Flat File Connection Manager]"
+                  connectionManagerRefId="Package.ConnectionManagers[Flat File Connection Manager]"
+                  name="FlatFileConnection" />
+              </connections>
+              <inputs>
+                <input
+                  refId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano]"
+                  hasSideEffects="true"
+                  name="Entrada de destino de archivo plano">
+                  <inputColumns>
+                    <inputColumn
+                      refId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].Columns[IdCliente]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="IdCliente"
+                      cachedSortKeyPosition="1"
+                      externalMetadataColumnId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].ExternalColumns[IdCliente]"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[IdCliente]" />
+                    <inputColumn
+                      refId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].Columns[Nombre]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Nombre"
+                      externalMetadataColumnId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].ExternalColumns[Nombre]"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Nombre]" />
+                    <inputColumn
+                      refId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].Columns[Apellido]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Apellido"
+                      externalMetadataColumnId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].ExternalColumns[Apellido]"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Apellido]" />
+                    <inputColumn
+                      refId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].Columns[Correo]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Correo"
+                      externalMetadataColumnId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].ExternalColumns[Correo]"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Correo]" />
+                    <inputColumn
+                      refId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].Columns[Telefono]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Telefono"
+                      externalMetadataColumnId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].ExternalColumns[Telefono]"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Telefono]" />
+                    <inputColumn
+                      refId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].Columns[Ciudad]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Ciudad"
+                      externalMetadataColumnId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].ExternalColumns[Ciudad]"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Ciudad]" />
+                    <inputColumn
+                      refId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].Columns[Estado]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Estado"
+                      externalMetadataColumnId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].ExternalColumns[Estado]"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Estado]" />
+                    <inputColumn
+                      refId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].Columns[Pais]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Pais"
+                      externalMetadataColumnId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].ExternalColumns[Pais]"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Pais]" />
+                    <inputColumn
+                      refId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].Columns[Activo]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Activo"
+                      externalMetadataColumnId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].ExternalColumns[Activo]"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Activo]" />
+                    <inputColumn
+                      refId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].Columns[FechaRegistro]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="FechaRegistro"
+                      externalMetadataColumnId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].ExternalColumns[FechaRegistro]"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[FechaRegistro]" />
+                    <inputColumn
+                      refId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].Columns[ErrorCode]"
+                      cachedDataType="i4"
+                      cachedName="ErrorCode"
+                      externalMetadataColumnId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].ExternalColumns[ErrorCode]"
+                      lineageId="Package\ETL Clientes\Conversión de datos.Outputs[Salida de error de conversión de datos].Columns[ErrorCode]" />
+                    <inputColumn
+                      refId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].Columns[ErrorColumn]"
+                      cachedDataType="i4"
+                      cachedName="ErrorColumn"
+                      externalMetadataColumnId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].ExternalColumns[ErrorColumn]"
+                      lineageId="Package\ETL Clientes\Conversión de datos.Outputs[Salida de error de conversión de datos].Columns[ErrorColumn]" />
+                  </inputColumns>
+                  <externalMetadataColumns
+                    isUsed="True">
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].ExternalColumns[IdCliente]"
+                      codePage="1252"
+                      dataType="str"
+                      length="50"
+                      name="IdCliente" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].ExternalColumns[Nombre]"
+                      codePage="1252"
+                      dataType="str"
+                      length="50"
+                      name="Nombre" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].ExternalColumns[Apellido]"
+                      codePage="1252"
+                      dataType="str"
+                      length="50"
+                      name="Apellido" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].ExternalColumns[Correo]"
+                      codePage="1252"
+                      dataType="str"
+                      length="50"
+                      name="Correo" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].ExternalColumns[Telefono]"
+                      codePage="1252"
+                      dataType="str"
+                      length="50"
+                      name="Telefono" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].ExternalColumns[Ciudad]"
+                      codePage="1252"
+                      dataType="str"
+                      length="50"
+                      name="Ciudad" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].ExternalColumns[Estado]"
+                      codePage="1252"
+                      dataType="str"
+                      length="50"
+                      name="Estado" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].ExternalColumns[Pais]"
+                      codePage="1252"
+                      dataType="str"
+                      length="50"
+                      name="Pais" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].ExternalColumns[Activo]"
+                      codePage="1252"
+                      dataType="str"
+                      length="50"
+                      name="Activo" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].ExternalColumns[FechaRegistro]"
+                      codePage="1252"
+                      dataType="str"
+                      length="50"
+                      name="FechaRegistro" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].ExternalColumns[ErrorCode]"
+                      dataType="i4"
+                      name="ErrorCode" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano].ExternalColumns[ErrorColumn]"
+                      dataType="i4"
+                      name="ErrorColumn" />
+                  </externalMetadataColumns>
+                </input>
+              </inputs>
+            </component>
+            <component
+              refId="Package\ETL Clientes\Destino de OLE DB"
+              componentClassID="Microsoft.OLEDBDestination"
+              contactInfo="Destino de OLE DB;Microsoft Corporation; Microsoft SQL Server; (C) Microsoft Corporation; Todos los derechos reservados; http://www.microsoft.com/sql/support;4"
+              description="Destino de OLE DB"
+              name="Destino de OLE DB"
+              usesDispositions="true"
+              version="4">
+              <properties>
+                <property
+                  dataType="System.Int32"
+                  description="Número de segundos antes de que se agote el tiempo de espera de un comando. Un valor de 0 indica un tiempo de espera infinito."
+                  name="CommandTimeout">0</property>
+                <property
+                  dataType="System.String"
+                  description="Especifica el nombre del objeto de base de datos usado para abrir un conjunto de filas."
+                  name="OpenRowset">[dbo].[DimCliente]</property>
+                <property
+                  dataType="System.String"
+                  description="Especifica la variable que contiene el nombre del objeto de base de datos usado para abrir un conjunto de filas."
+                  name="OpenRowsetVariable"></property>
+                <property
+                  dataType="System.String"
+                  description="Comando SQL para ejecutar."
+                  name="SqlCommand"
+                  UITypeEditor="Microsoft.DataTransformationServices.Controls.ModalMultilineStringEditor"></property>
+                <property
+                  dataType="System.Int32"
+                  description="Especifica la página de códigos de columna para utilizar cuando la información de página de códigos no está disponible en el origen de datos."
+                  name="DefaultCodePage">1252</property>
+                <property
+                  dataType="System.Boolean"
+                  description="Fuerza el uso del valor de la propiedad DefaultCodePage al describir datos de caracteres."
+                  name="AlwaysUseDefaultCodePage">false</property>
+                <property
+                  dataType="System.Int32"
+                  description="Especifica el modo utilizado para obtener acceso a la base de datos."
+                  name="AccessMode"
+                  typeConverter="AccessMode">0</property>
+                <property
+                  dataType="System.Boolean"
+                  description="Indica si los valores proporcionados para columnas de identidad se van a copiar al destino. Si es False, los valores de las columnas de identidad se generan automáticamente en el destino. Solo se aplica si está activada la carga rápida."
+                  name="FastLoadKeepIdentity">false</property>
+                <property
+                  dataType="System.Boolean"
+                  description="Indica si las columnas que contienen NULL tendrán NULL insertado en el destino. Si es False, las columnas que contienen NULL tendrán sus valores predeterminados insertados en el destino. Solo se aplica si está activada la carga rápida."
+                  name="FastLoadKeepNulls">false</property>
+                <property
+                  dataType="System.String"
+                  description="Especifica opciones para usar con la carga rápida. Solo se aplica si está activada la carga rápida."
+                  name="FastLoadOptions"></property>
+                <property
+                  dataType="System.Int32"
+                  description="Especifica cuándo se emiten confirmaciones durante la inserción de datos. El valor 0 especifica que se emitirá una confirmación al final de la inserción de datos. Solo se aplica si está activada la carga rápida."
+                  name="FastLoadMaxInsertCommitSize">2147483647</property>
+              </properties>
+              <connections>
+                <connection
+                  refId="Package\ETL Clientes\Destino de OLE DB.Connections[OleDbConnection]"
+                  connectionManagerID="Package.ConnectionManagers[DESKTOP-N6EERLJ.DWUTVTVentas]"
+                  connectionManagerRefId="Package.ConnectionManagers[DESKTOP-N6EERLJ.DWUTVTVentas]"
+                  description="La conexión de tiempo de ejecución OLE DB usada para obtener acceso a la base de datos."
+                  name="OleDbConnection" />
+              </connections>
+              <inputs>
+                <input
+                  refId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB]"
+                  errorOrTruncationOperation="Insertar"
+                  errorRowDisposition="FailComponent"
+                  hasSideEffects="true"
+                  name="Entrada de destino de OLE DB">
+                  <inputColumns>
+                    <inputColumn
+                      refId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].Columns[Nombre]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Nombre"
+                      externalMetadataColumnId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].ExternalColumns[Nombre]"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Nombre]" />
+                    <inputColumn
+                      refId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].Columns[Apellido]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Apellido"
+                      externalMetadataColumnId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].ExternalColumns[Apellido]"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Apellido]" />
+                    <inputColumn
+                      refId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].Columns[Correo]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Correo"
+                      externalMetadataColumnId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].ExternalColumns[Correo]"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Correo]" />
+                    <inputColumn
+                      refId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].Columns[Telefono]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Telefono"
+                      externalMetadataColumnId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].ExternalColumns[Telefono]"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Telefono]" />
+                    <inputColumn
+                      refId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].Columns[Ciudad]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Ciudad"
+                      externalMetadataColumnId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].ExternalColumns[Ciudad]"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Ciudad]" />
+                    <inputColumn
+                      refId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].Columns[Estado]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Estado"
+                      externalMetadataColumnId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].ExternalColumns[Estado]"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Estado]" />
+                    <inputColumn
+                      refId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].Columns[Pais]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Pais"
+                      externalMetadataColumnId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].ExternalColumns[Pais]"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Pais]" />
+                    <inputColumn
+                      refId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].Columns[IdCliente_Int]"
+                      cachedDataType="i4"
+                      cachedName="IdCliente_Int"
+                      externalMetadataColumnId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].ExternalColumns[IdClienteOrigen]"
+                      lineageId="Package\ETL Clientes\Conversión de datos.Outputs[Salida de conversión de datos].Columns[IdCliente_Int]" />
+                    <inputColumn
+                      refId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].Columns[FechaRegistro_Date]"
+                      cachedDataType="dbDate"
+                      cachedName="FechaRegistro_Date"
+                      externalMetadataColumnId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].ExternalColumns[FechaRegistro]"
+                      lineageId="Package\ETL Clientes\Conversión de datos.Outputs[Salida de conversión de datos].Columns[FechaRegistro_Date]" />
+                    <inputColumn
+                      refId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].Columns[FechaRegistro]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="FechaRegistro"
+                      externalMetadataColumnId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].ExternalColumns[FechaCarga]"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[FechaRegistro]" />
+                  </inputColumns>
+                  <externalMetadataColumns
+                    isUsed="True">
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].ExternalColumns[IdClienteSK]"
+                      dataType="i4"
+                      name="IdClienteSK" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].ExternalColumns[IdClienteOrigen]"
+                      dataType="i4"
+                      name="IdClienteOrigen" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].ExternalColumns[Nombre]"
+                      codePage="1252"
+                      dataType="str"
+                      length="100"
+                      name="Nombre" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].ExternalColumns[Apellido]"
+                      codePage="1252"
+                      dataType="str"
+                      length="100"
+                      name="Apellido" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].ExternalColumns[Correo]"
+                      codePage="1252"
+                      dataType="str"
+                      length="150"
+                      name="Correo" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].ExternalColumns[Telefono]"
+                      codePage="1252"
+                      dataType="str"
+                      length="20"
+                      name="Telefono" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].ExternalColumns[Ciudad]"
+                      codePage="1252"
+                      dataType="str"
+                      length="100"
+                      name="Ciudad" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].ExternalColumns[Estado]"
+                      codePage="1252"
+                      dataType="str"
+                      length="100"
+                      name="Estado" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].ExternalColumns[Pais]"
+                      codePage="1252"
+                      dataType="str"
+                      length="100"
+                      name="Pais" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].ExternalColumns[FechaRegistro]"
+                      dataType="wstr"
+                      length="10"
+                      name="FechaRegistro" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB].ExternalColumns[FechaCarga]"
+                      dataType="dbTimeStamp"
+                      name="FechaCarga" />
+                  </externalMetadataColumns>
+                </input>
+              </inputs>
+              <outputs>
+                <output
+                  refId="Package\ETL Clientes\Destino de OLE DB.Outputs[Salida de error de destino de OLE DB]"
+                  exclusionGroup="1"
+                  isErrorOut="true"
+                  name="Salida de error de destino de OLE DB"
+                  synchronousInputId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB]">
+                  <outputColumns>
+                    <outputColumn
+                      refId="Package\ETL Clientes\Destino de OLE DB.Outputs[Salida de error de destino de OLE DB].Columns[ErrorCode]"
+                      dataType="i4"
+                      lineageId="Package\ETL Clientes\Destino de OLE DB.Outputs[Salida de error de destino de OLE DB].Columns[ErrorCode]"
+                      name="ErrorCode"
+                      specialFlags="1" />
+                    <outputColumn
+                      refId="Package\ETL Clientes\Destino de OLE DB.Outputs[Salida de error de destino de OLE DB].Columns[ErrorColumn]"
+                      dataType="i4"
+                      lineageId="Package\ETL Clientes\Destino de OLE DB.Outputs[Salida de error de destino de OLE DB].Columns[ErrorColumn]"
+                      name="ErrorColumn"
+                      specialFlags="2" />
+                  </outputColumns>
+                  <externalMetadataColumns />
+                </output>
+              </outputs>
+            </component>
+            <component
+              refId="Package\ETL Clientes\División condicional"
+              componentClassID="Microsoft.ConditionalSplit"
+              contactInfo="División condicional;Microsoft Corporation; Microsoft SQL Server; (C) Microsoft Corporation; Todos los derechos reservados; http://www.microsoft.com/sql/support;0"
+              description="Enruta filas de datos a diferentes salidas según el contenido de los datos. Se usan condiciones (expresiones de SSIS) para especificar las filas que se van a enrutar. Por ejemplo, se usa para separar los registros que deben limpiarse de los registros listos para ser cargados o para enrutar solamente un subconjunto de registros."
+              name="División condicional"
+              usesDispositions="true">
+              <inputs>
+                <input
+                  refId="Package\ETL Clientes\División condicional.Inputs[Entrada de división condicional]"
+                  description="Entrada en la transformación División condicional"
+                  name="Entrada de división condicional">
+                  <inputColumns>
+                    <inputColumn
+                      refId="Package\ETL Clientes\División condicional.Inputs[Entrada de división condicional].Columns[Activo]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Activo"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Activo]" />
+                  </inputColumns>
+                  <externalMetadataColumns />
+                </input>
+              </inputs>
+              <outputs>
+                <output
+                  refId="Package\ETL Clientes\División condicional.Outputs[ClientesActivos]"
+                  description="Salida 1 de la transformación División condicional"
+                  errorOrTruncationOperation="Cálculo"
+                  errorRowDisposition="FailComponent"
+                  exclusionGroup="1"
+                  name="ClientesActivos"
+                  synchronousInputId="Package\ETL Clientes\División condicional.Inputs[Entrada de división condicional]"
+                  truncationRowDisposition="FailComponent">
+                  <properties>
+                    <property
+                      containsID="true"
+                      dataType="System.String"
+                      description="Especifica la expresión. Esta versión de expresión usa identificadores de linaje en lugar de nombres de columna."
+                      name="Expression">#{Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Activo]} == "1"</property>
+                    <property
+                      containsID="true"
+                      dataType="System.String"
+                      description="Especifica la versión descriptiva de la expresión. Esta versión de expresión usa nombres de columna."
+                      expressionType="Notify"
+                      name="FriendlyExpression">Activo == "1"</property>
+                    <property
+                      dataType="System.Int32"
+                      description="Especifica la posición de la condición en la lista de condiciones que evalúa la transformación. El orden de evaluación es del menor al mayor valor."
+                      name="EvaluationOrder">0</property>
+                  </properties>
+                  <externalMetadataColumns />
+                </output>
+                <output
+                  refId="Package\ETL Clientes\División condicional.Outputs[ClientesInactivos]"
+                  description="Salida predeterminada de la transformación División condicional"
+                  exclusionGroup="1"
+                  name="ClientesInactivos"
+                  synchronousInputId="Package\ETL Clientes\División condicional.Inputs[Entrada de división condicional]">
+                  <properties>
+                    <property
+                      dataType="System.Boolean"
+                      name="IsDefaultOut">true</property>
+                  </properties>
+                  <externalMetadataColumns />
+                </output>
+                <output
+                  refId="Package\ETL Clientes\División condicional.Outputs[Salida de error de división condicional]"
+                  description="Salida de error de la transformación División condicional"
+                  exclusionGroup="1"
+                  isErrorOut="true"
+                  name="Salida de error de división condicional"
+                  synchronousInputId="Package\ETL Clientes\División condicional.Inputs[Entrada de división condicional]">
+                  <outputColumns>
+                    <outputColumn
+                      refId="Package\ETL Clientes\División condicional.Outputs[Salida de error de división condicional].Columns[ErrorCode]"
+                      dataType="i4"
+                      lineageId="Package\ETL Clientes\División condicional.Outputs[Salida de error de división condicional].Columns[ErrorCode]"
+                      name="ErrorCode"
+                      specialFlags="1" />
+                    <outputColumn
+                      refId="Package\ETL Clientes\División condicional.Outputs[Salida de error de división condicional].Columns[ErrorColumn]"
+                      dataType="i4"
+                      lineageId="Package\ETL Clientes\División condicional.Outputs[Salida de error de división condicional].Columns[ErrorColumn]"
+                      name="ErrorColumn"
+                      specialFlags="2" />
+                  </outputColumns>
+                  <externalMetadataColumns />
+                </output>
+              </outputs>
+            </component>
+            <component
+              refId="Package\ETL Clientes\Ordenar"
+              componentClassID="Microsoft.Sort"
+              contactInfo="Ordenar;Microsoft Corporation; Microsoft SQL Server; (C) Microsoft Corporation; Todos los derechos reservados; http://www.microsoft.com/sql/support;1"
+              description="Ordena los datos de entrada de manera ascendente o descendente cuando no es posible ordenarlos en su origen. Por ejemplo, se ordenan los datos de ventas por 'id. de cliente' antes de que se escriban en un archivo plano y se entreguen a otro departamento. Nota: no se recomienda realizar esta transformación para grandes flujos de datos."
+              name="Ordenar"
+              version="1">
+              <properties>
+                <property
+                  dataType="System.Boolean"
+                  description="Indica si la transformación Ordenar quita filas con valores de ordenación duplicados."
+                  name="EliminateDuplicates">true</property>
+                <property
+                  dataType="System.Int32"
+                  description="Especifica el número máximo de subprocesos que se deben usar para la ordenación."
+                  expressionType="Notify"
+                  name="MaximumThreads">-1</property>
+              </properties>
+              <inputs>
+                <input
+                  refId="Package\ETL Clientes\Ordenar.Inputs[Entrada de ordenación]"
+                  name="Entrada de ordenación">
+                  <inputColumns>
+                    <inputColumn
+                      refId="Package\ETL Clientes\Ordenar.Inputs[Entrada de ordenación].Columns[IdCliente]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="IdCliente"
+                      lineageId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[IdCliente]">
+                      <properties>
+                        <property
+                          dataType="System.Int32"
+                          description="Especifica las opciones de comparación para datos de caracteres."
+                          name="NewComparisonFlags">0</property>
+                        <property
+                          dataType="System.Int32"
+                          description="Especifica el criterio de ordenación de la columna."
+                          name="NewSortKeyPosition">1</property>
+                      </properties>
+                    </inputColumn>
+                    <inputColumn
+                      refId="Package\ETL Clientes\Ordenar.Inputs[Entrada de ordenación].Columns[Nombre]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Nombre"
+                      lineageId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Nombre]">
+                      <properties>
+                        <property
+                          dataType="System.Int32"
+                          description="Especifica las opciones de comparación para datos de caracteres."
+                          name="NewComparisonFlags">0</property>
+                        <property
+                          dataType="System.Int32"
+                          description="Especifica el criterio de ordenación de la columna."
+                          name="NewSortKeyPosition">0</property>
+                      </properties>
+                    </inputColumn>
+                    <inputColumn
+                      refId="Package\ETL Clientes\Ordenar.Inputs[Entrada de ordenación].Columns[Apellido]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Apellido"
+                      lineageId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Apellido]">
+                      <properties>
+                        <property
+                          dataType="System.Int32"
+                          description="Especifica las opciones de comparación para datos de caracteres."
+                          name="NewComparisonFlags">0</property>
+                        <property
+                          dataType="System.Int32"
+                          description="Especifica el criterio de ordenación de la columna."
+                          name="NewSortKeyPosition">0</property>
+                      </properties>
+                    </inputColumn>
+                    <inputColumn
+                      refId="Package\ETL Clientes\Ordenar.Inputs[Entrada de ordenación].Columns[Correo]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Correo"
+                      lineageId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Correo]">
+                      <properties>
+                        <property
+                          dataType="System.Int32"
+                          description="Especifica las opciones de comparación para datos de caracteres."
+                          name="NewComparisonFlags">0</property>
+                        <property
+                          dataType="System.Int32"
+                          description="Especifica el criterio de ordenación de la columna."
+                          name="NewSortKeyPosition">0</property>
+                      </properties>
+                    </inputColumn>
+                    <inputColumn
+                      refId="Package\ETL Clientes\Ordenar.Inputs[Entrada de ordenación].Columns[Telefono]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Telefono"
+                      lineageId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Telefono]">
+                      <properties>
+                        <property
+                          dataType="System.Int32"
+                          description="Especifica las opciones de comparación para datos de caracteres."
+                          name="NewComparisonFlags">0</property>
+                        <property
+                          dataType="System.Int32"
+                          description="Especifica el criterio de ordenación de la columna."
+                          name="NewSortKeyPosition">0</property>
+                      </properties>
+                    </inputColumn>
+                    <inputColumn
+                      refId="Package\ETL Clientes\Ordenar.Inputs[Entrada de ordenación].Columns[Ciudad]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Ciudad"
+                      lineageId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Ciudad]">
+                      <properties>
+                        <property
+                          dataType="System.Int32"
+                          description="Especifica las opciones de comparación para datos de caracteres."
+                          name="NewComparisonFlags">0</property>
+                        <property
+                          dataType="System.Int32"
+                          description="Especifica el criterio de ordenación de la columna."
+                          name="NewSortKeyPosition">0</property>
+                      </properties>
+                    </inputColumn>
+                    <inputColumn
+                      refId="Package\ETL Clientes\Ordenar.Inputs[Entrada de ordenación].Columns[Estado]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Estado"
+                      lineageId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Estado]">
+                      <properties>
+                        <property
+                          dataType="System.Int32"
+                          description="Especifica las opciones de comparación para datos de caracteres."
+                          name="NewComparisonFlags">0</property>
+                        <property
+                          dataType="System.Int32"
+                          description="Especifica el criterio de ordenación de la columna."
+                          name="NewSortKeyPosition">0</property>
+                      </properties>
+                    </inputColumn>
+                    <inputColumn
+                      refId="Package\ETL Clientes\Ordenar.Inputs[Entrada de ordenación].Columns[Pais]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Pais"
+                      lineageId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Pais]">
+                      <properties>
+                        <property
+                          dataType="System.Int32"
+                          description="Especifica las opciones de comparación para datos de caracteres."
+                          name="NewComparisonFlags">0</property>
+                        <property
+                          dataType="System.Int32"
+                          description="Especifica el criterio de ordenación de la columna."
+                          name="NewSortKeyPosition">0</property>
+                      </properties>
+                    </inputColumn>
+                    <inputColumn
+                      refId="Package\ETL Clientes\Ordenar.Inputs[Entrada de ordenación].Columns[Activo]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="Activo"
+                      lineageId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Activo]">
+                      <properties>
+                        <property
+                          dataType="System.Int32"
+                          description="Especifica las opciones de comparación para datos de caracteres."
+                          name="NewComparisonFlags">0</property>
+                        <property
+                          dataType="System.Int32"
+                          description="Especifica el criterio de ordenación de la columna."
+                          name="NewSortKeyPosition">0</property>
+                      </properties>
+                    </inputColumn>
+                    <inputColumn
+                      refId="Package\ETL Clientes\Ordenar.Inputs[Entrada de ordenación].Columns[FechaRegistro]"
+                      cachedCodepage="65001"
+                      cachedDataType="str"
+                      cachedLength="50"
+                      cachedName="FechaRegistro"
+                      lineageId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[FechaRegistro]">
+                      <properties>
+                        <property
+                          dataType="System.Int32"
+                          description="Especifica las opciones de comparación para datos de caracteres."
+                          name="NewComparisonFlags">0</property>
+                        <property
+                          dataType="System.Int32"
+                          description="Especifica el criterio de ordenación de la columna."
+                          name="NewSortKeyPosition">0</property>
+                      </properties>
+                    </inputColumn>
+                  </inputColumns>
+                  <externalMetadataColumns />
+                </input>
+              </inputs>
+              <outputs>
+                <output
+                  refId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación]"
+                  isSorted="true"
+                  name="Salida de ordenación">
+                  <outputColumns>
+                    <outputColumn
+                      refId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[IdCliente]"
+                      codePage="65001"
+                      dataType="str"
+                      length="50"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[IdCliente]"
+                      name="IdCliente"
+                      sortKeyPosition="1">
+                      <properties>
+                        <property
+                          containsID="true"
+                          dataType="System.Int32"
+                          description="Especifica el identificador de linaje de la columna de entrada que está asociada a esta columna de salida."
+                          name="SortColumnId">#{Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[IdCliente]}</property>
+                      </properties>
+                    </outputColumn>
+                    <outputColumn
+                      refId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Nombre]"
+                      codePage="65001"
+                      dataType="str"
+                      length="50"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Nombre]"
+                      name="Nombre">
+                      <properties>
+                        <property
+                          containsID="true"
+                          dataType="System.Int32"
+                          description="Especifica el identificador de linaje de la columna de entrada que está asociada a esta columna de salida."
+                          name="SortColumnId">#{Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Nombre]}</property>
+                      </properties>
+                    </outputColumn>
+                    <outputColumn
+                      refId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Apellido]"
+                      codePage="65001"
+                      dataType="str"
+                      length="50"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Apellido]"
+                      name="Apellido">
+                      <properties>
+                        <property
+                          containsID="true"
+                          dataType="System.Int32"
+                          description="Especifica el identificador de linaje de la columna de entrada que está asociada a esta columna de salida."
+                          name="SortColumnId">#{Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Apellido]}</property>
+                      </properties>
+                    </outputColumn>
+                    <outputColumn
+                      refId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Correo]"
+                      codePage="65001"
+                      dataType="str"
+                      length="50"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Correo]"
+                      name="Correo">
+                      <properties>
+                        <property
+                          containsID="true"
+                          dataType="System.Int32"
+                          description="Especifica el identificador de linaje de la columna de entrada que está asociada a esta columna de salida."
+                          name="SortColumnId">#{Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Correo]}</property>
+                      </properties>
+                    </outputColumn>
+                    <outputColumn
+                      refId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Telefono]"
+                      codePage="65001"
+                      dataType="str"
+                      length="50"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Telefono]"
+                      name="Telefono">
+                      <properties>
+                        <property
+                          containsID="true"
+                          dataType="System.Int32"
+                          description="Especifica el identificador de linaje de la columna de entrada que está asociada a esta columna de salida."
+                          name="SortColumnId">#{Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Telefono]}</property>
+                      </properties>
+                    </outputColumn>
+                    <outputColumn
+                      refId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Ciudad]"
+                      codePage="65001"
+                      dataType="str"
+                      length="50"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Ciudad]"
+                      name="Ciudad">
+                      <properties>
+                        <property
+                          containsID="true"
+                          dataType="System.Int32"
+                          description="Especifica el identificador de linaje de la columna de entrada que está asociada a esta columna de salida."
+                          name="SortColumnId">#{Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Ciudad]}</property>
+                      </properties>
+                    </outputColumn>
+                    <outputColumn
+                      refId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Estado]"
+                      codePage="65001"
+                      dataType="str"
+                      length="50"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Estado]"
+                      name="Estado">
+                      <properties>
+                        <property
+                          containsID="true"
+                          dataType="System.Int32"
+                          description="Especifica el identificador de linaje de la columna de entrada que está asociada a esta columna de salida."
+                          name="SortColumnId">#{Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Estado]}</property>
+                      </properties>
+                    </outputColumn>
+                    <outputColumn
+                      refId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Pais]"
+                      codePage="65001"
+                      dataType="str"
+                      length="50"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Pais]"
+                      name="Pais">
+                      <properties>
+                        <property
+                          containsID="true"
+                          dataType="System.Int32"
+                          description="Especifica el identificador de linaje de la columna de entrada que está asociada a esta columna de salida."
+                          name="SortColumnId">#{Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Pais]}</property>
+                      </properties>
+                    </outputColumn>
+                    <outputColumn
+                      refId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Activo]"
+                      codePage="65001"
+                      dataType="str"
+                      length="50"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[Activo]"
+                      name="Activo">
+                      <properties>
+                        <property
+                          containsID="true"
+                          dataType="System.Int32"
+                          description="Especifica el identificador de linaje de la columna de entrada que está asociada a esta columna de salida."
+                          name="SortColumnId">#{Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Activo]}</property>
+                      </properties>
+                    </outputColumn>
+                    <outputColumn
+                      refId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[FechaRegistro]"
+                      codePage="65001"
+                      dataType="str"
+                      length="50"
+                      lineageId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación].Columns[FechaRegistro]"
+                      name="FechaRegistro">
+                      <properties>
+                        <property
+                          containsID="true"
+                          dataType="System.Int32"
+                          description="Especifica el identificador de linaje de la columna de entrada que está asociada a esta columna de salida."
+                          name="SortColumnId">#{Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[FechaRegistro]}</property>
+                      </properties>
+                    </outputColumn>
+                  </outputColumns>
+                  <externalMetadataColumns />
+                </output>
+              </outputs>
+            </component>
+            <component
+              refId="Package\ETL Clientes\Origen de archivo plano"
+              componentClassID="Microsoft.FlatFileSource"
+              contactInfo="Origen de archivo plano;Microsoft Corporation; Microsoft SQL Server; (C) Microsoft Corporation; Todos los derechos reservados; http://www.microsoft.com/sql/support;1"
+              description="Origen de archivo plano"
+              localeId="2058"
+              name="Origen de archivo plano"
+              usesDispositions="true"
+              version="1">
+              <properties>
+                <property
+                  dataType="System.Boolean"
+                  description="Especifica si las columnas de longitud cero se tratan como NULL."
+                  name="RetainNulls">false</property>
+                <property
+                  dataType="System.String"
+                  description="Especifica el nombre de una columna de salida que contiene el nombre de archivo. Si no se especifica ningún nombre, no se genera ninguna columna de salida con el nombre de archivo."
+                  name="FileNameColumnName"></property>
+              </properties>
+              <connections>
+                <connection
+                  refId="Package\ETL Clientes\Origen de archivo plano.Connections[FlatFileConnection]"
+                  connectionManagerID="Package.ConnectionManagers[Administrador de conexiones de archivos planos]"
+                  connectionManagerRefId="Package.ConnectionManagers[Administrador de conexiones de archivos planos]"
+                  name="FlatFileConnection" />
+              </connections>
+              <outputs>
+                <output
+                  refId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano]"
+                  name="Salida de origen de archivo plano">
+                  <outputColumns>
+                    <outputColumn
+                      refId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[IdCliente]"
+                      codePage="65001"
+                      dataType="str"
+                      errorOrTruncationOperation="Conversión"
+                      errorRowDisposition="FailComponent"
+                      externalMetadataColumnId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].ExternalColumns[IdCliente]"
+                      length="50"
+                      lineageId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[IdCliente]"
+                      name="IdCliente"
+                      truncationRowDisposition="FailComponent">
+                      <properties>
+                        <property
+                          dataType="System.Boolean"
+                          description="Indica si la columna usa las rutinas de análisis más rápidas independientes de la configuración regional."
+                          name="FastParse">false</property>
+                        <property
+                          dataType="System.Boolean"
+                          description="Indica si los datos están en formato binario."
+                          name="UseBinaryFormat">false</property>
+                      </properties>
+                    </outputColumn>
+                    <outputColumn
+                      refId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Nombre]"
+                      codePage="65001"
+                      dataType="str"
+                      errorOrTruncationOperation="Conversión"
+                      errorRowDisposition="FailComponent"
+                      externalMetadataColumnId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].ExternalColumns[Nombre]"
+                      length="50"
+                      lineageId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Nombre]"
+                      name="Nombre"
+                      truncationRowDisposition="FailComponent">
+                      <properties>
+                        <property
+                          dataType="System.Boolean"
+                          description="Indica si la columna usa las rutinas de análisis más rápidas independientes de la configuración regional."
+                          name="FastParse">false</property>
+                        <property
+                          dataType="System.Boolean"
+                          description="Indica si los datos están en formato binario."
+                          name="UseBinaryFormat">false</property>
+                      </properties>
+                    </outputColumn>
+                    <outputColumn
+                      refId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Apellido]"
+                      codePage="65001"
+                      dataType="str"
+                      errorOrTruncationOperation="Conversión"
+                      errorRowDisposition="FailComponent"
+                      externalMetadataColumnId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].ExternalColumns[Apellido]"
+                      length="50"
+                      lineageId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Apellido]"
+                      name="Apellido"
+                      truncationRowDisposition="FailComponent">
+                      <properties>
+                        <property
+                          dataType="System.Boolean"
+                          description="Indica si la columna usa las rutinas de análisis más rápidas independientes de la configuración regional."
+                          name="FastParse">false</property>
+                        <property
+                          dataType="System.Boolean"
+                          description="Indica si los datos están en formato binario."
+                          name="UseBinaryFormat">false</property>
+                      </properties>
+                    </outputColumn>
+                    <outputColumn
+                      refId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Correo]"
+                      codePage="65001"
+                      dataType="str"
+                      errorOrTruncationOperation="Conversión"
+                      errorRowDisposition="FailComponent"
+                      externalMetadataColumnId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].ExternalColumns[Correo]"
+                      length="50"
+                      lineageId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Correo]"
+                      name="Correo"
+                      truncationRowDisposition="FailComponent">
+                      <properties>
+                        <property
+                          dataType="System.Boolean"
+                          description="Indica si la columna usa las rutinas de análisis más rápidas independientes de la configuración regional."
+                          name="FastParse">false</property>
+                        <property
+                          dataType="System.Boolean"
+                          description="Indica si los datos están en formato binario."
+                          name="UseBinaryFormat">false</property>
+                      </properties>
+                    </outputColumn>
+                    <outputColumn
+                      refId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Telefono]"
+                      codePage="65001"
+                      dataType="str"
+                      errorOrTruncationOperation="Conversión"
+                      errorRowDisposition="FailComponent"
+                      externalMetadataColumnId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].ExternalColumns[Telefono]"
+                      length="50"
+                      lineageId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Telefono]"
+                      name="Telefono"
+                      truncationRowDisposition="FailComponent">
+                      <properties>
+                        <property
+                          dataType="System.Boolean"
+                          description="Indica si la columna usa las rutinas de análisis más rápidas independientes de la configuración regional."
+                          name="FastParse">false</property>
+                        <property
+                          dataType="System.Boolean"
+                          description="Indica si los datos están en formato binario."
+                          name="UseBinaryFormat">false</property>
+                      </properties>
+                    </outputColumn>
+                    <outputColumn
+                      refId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Ciudad]"
+                      codePage="65001"
+                      dataType="str"
+                      errorOrTruncationOperation="Conversión"
+                      errorRowDisposition="FailComponent"
+                      externalMetadataColumnId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].ExternalColumns[Ciudad]"
+                      length="50"
+                      lineageId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Ciudad]"
+                      name="Ciudad"
+                      truncationRowDisposition="FailComponent">
+                      <properties>
+                        <property
+                          dataType="System.Boolean"
+                          description="Indica si la columna usa las rutinas de análisis más rápidas independientes de la configuración regional."
+                          name="FastParse">false</property>
+                        <property
+                          dataType="System.Boolean"
+                          description="Indica si los datos están en formato binario."
+                          name="UseBinaryFormat">false</property>
+                      </properties>
+                    </outputColumn>
+                    <outputColumn
+                      refId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Estado]"
+                      codePage="65001"
+                      dataType="str"
+                      errorOrTruncationOperation="Conversión"
+                      errorRowDisposition="FailComponent"
+                      externalMetadataColumnId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].ExternalColumns[Estado]"
+                      length="50"
+                      lineageId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Estado]"
+                      name="Estado"
+                      truncationRowDisposition="FailComponent">
+                      <properties>
+                        <property
+                          dataType="System.Boolean"
+                          description="Indica si la columna usa las rutinas de análisis más rápidas independientes de la configuración regional."
+                          name="FastParse">false</property>
+                        <property
+                          dataType="System.Boolean"
+                          description="Indica si los datos están en formato binario."
+                          name="UseBinaryFormat">false</property>
+                      </properties>
+                    </outputColumn>
+                    <outputColumn
+                      refId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Pais]"
+                      codePage="65001"
+                      dataType="str"
+                      errorOrTruncationOperation="Conversión"
+                      errorRowDisposition="FailComponent"
+                      externalMetadataColumnId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].ExternalColumns[Pais]"
+                      length="50"
+                      lineageId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Pais]"
+                      name="Pais"
+                      truncationRowDisposition="FailComponent">
+                      <properties>
+                        <property
+                          dataType="System.Boolean"
+                          description="Indica si la columna usa las rutinas de análisis más rápidas independientes de la configuración regional."
+                          name="FastParse">false</property>
+                        <property
+                          dataType="System.Boolean"
+                          description="Indica si los datos están en formato binario."
+                          name="UseBinaryFormat">false</property>
+                      </properties>
+                    </outputColumn>
+                    <outputColumn
+                      refId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Activo]"
+                      codePage="65001"
+                      dataType="str"
+                      errorOrTruncationOperation="Conversión"
+                      errorRowDisposition="FailComponent"
+                      externalMetadataColumnId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].ExternalColumns[Activo]"
+                      length="50"
+                      lineageId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[Activo]"
+                      name="Activo"
+                      truncationRowDisposition="FailComponent">
+                      <properties>
+                        <property
+                          dataType="System.Boolean"
+                          description="Indica si la columna usa las rutinas de análisis más rápidas independientes de la configuración regional."
+                          name="FastParse">false</property>
+                        <property
+                          dataType="System.Boolean"
+                          description="Indica si los datos están en formato binario."
+                          name="UseBinaryFormat">false</property>
+                      </properties>
+                    </outputColumn>
+                    <outputColumn
+                      refId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[FechaRegistro]"
+                      codePage="65001"
+                      dataType="str"
+                      errorOrTruncationOperation="Conversión"
+                      errorRowDisposition="FailComponent"
+                      externalMetadataColumnId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].ExternalColumns[FechaRegistro]"
+                      length="50"
+                      lineageId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].Columns[FechaRegistro]"
+                      name="FechaRegistro"
+                      truncationRowDisposition="FailComponent">
+                      <properties>
+                        <property
+                          dataType="System.Boolean"
+                          description="Indica si la columna usa las rutinas de análisis más rápidas independientes de la configuración regional."
+                          name="FastParse">false</property>
+                        <property
+                          dataType="System.Boolean"
+                          description="Indica si los datos están en formato binario."
+                          name="UseBinaryFormat">false</property>
+                      </properties>
+                    </outputColumn>
+                  </outputColumns>
+                  <externalMetadataColumns
+                    isUsed="True">
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].ExternalColumns[IdCliente]"
+                      codePage="65001"
+                      dataType="str"
+                      length="50"
+                      name="IdCliente" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].ExternalColumns[Nombre]"
+                      codePage="65001"
+                      dataType="str"
+                      length="50"
+                      name="Nombre" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].ExternalColumns[Apellido]"
+                      codePage="65001"
+                      dataType="str"
+                      length="50"
+                      name="Apellido" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].ExternalColumns[Correo]"
+                      codePage="65001"
+                      dataType="str"
+                      length="50"
+                      name="Correo" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].ExternalColumns[Telefono]"
+                      codePage="65001"
+                      dataType="str"
+                      length="50"
+                      name="Telefono" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].ExternalColumns[Ciudad]"
+                      codePage="65001"
+                      dataType="str"
+                      length="50"
+                      name="Ciudad" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].ExternalColumns[Estado]"
+                      codePage="65001"
+                      dataType="str"
+                      length="50"
+                      name="Estado" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].ExternalColumns[Pais]"
+                      codePage="65001"
+                      dataType="str"
+                      length="50"
+                      name="Pais" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].ExternalColumns[Activo]"
+                      codePage="65001"
+                      dataType="str"
+                      length="50"
+                      name="Activo" />
+                    <externalMetadataColumn
+                      refId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano].ExternalColumns[FechaRegistro]"
+                      codePage="65001"
+                      dataType="str"
+                      length="50"
+                      name="FechaRegistro" />
+                  </externalMetadataColumns>
+                </output>
+                <output
+                  refId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de error de origen de archivo plano]"
+                  isErrorOut="true"
+                  name="Salida de error de origen de archivo plano">
+                  <outputColumns>
+                    <outputColumn
+                      refId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de error de origen de archivo plano].Columns[Columna de salida de error de origen de archivo plano]"
+                      codePage="65001"
+                      dataType="text"
+                      description="Columna de salida de error de origen de archivo plano"
+                      lineageId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de error de origen de archivo plano].Columns[Columna de salida de error de origen de archivo plano]"
+                      name="Columna de salida de error de origen de archivo plano" />
+                    <outputColumn
+                      refId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de error de origen de archivo plano].Columns[ErrorCode]"
+                      dataType="i4"
+                      lineageId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de error de origen de archivo plano].Columns[ErrorCode]"
+                      name="ErrorCode"
+                      specialFlags="1" />
+                    <outputColumn
+                      refId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de error de origen de archivo plano].Columns[ErrorColumn]"
+                      dataType="i4"
+                      lineageId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de error de origen de archivo plano].Columns[ErrorColumn]"
+                      name="ErrorColumn"
+                      specialFlags="2" />
+                  </outputColumns>
+                  <externalMetadataColumns />
+                </output>
+              </outputs>
+            </component>
+          </components>
+          <paths>
+            <path
+              refId="Package\ETL Clientes.Paths[ClientesActivos]"
+              endId="Package\ETL Clientes\Conversión de datos.Inputs[Entrada de conversión de datos]"
+              name="ClientesActivos"
+              startId="Package\ETL Clientes\División condicional.Outputs[ClientesActivos]" />
+            <path
+              refId="Package\ETL Clientes.Paths[Salida de columna derivada]"
+              endId="Package\ETL Clientes\División condicional.Inputs[Entrada de división condicional]"
+              name="Salida de columna derivada"
+              startId="Package\ETL Clientes\Columna derivada.Outputs[Salida de columna derivada]" />
+            <path
+              refId="Package\ETL Clientes.Paths[Salida de conversión de datos]"
+              endId="Package\ETL Clientes\Destino de OLE DB.Inputs[Entrada de destino de OLE DB]"
+              name="Salida de conversión de datos"
+              startId="Package\ETL Clientes\Conversión de datos.Outputs[Salida de conversión de datos]" />
+            <path
+              refId="Package\ETL Clientes.Paths[Salida de error de conversión de datos]"
+              endId="Package\ETL Clientes\Destino de archivo plano.Inputs[Entrada de destino de archivo plano]"
+              name="Salida de error de conversión de datos"
+              startId="Package\ETL Clientes\Conversión de datos.Outputs[Salida de error de conversión de datos]" />
+            <path
+              refId="Package\ETL Clientes.Paths[Salida de ordenación]"
+              endId="Package\ETL Clientes\Columna derivada.Inputs[Entrada de columna derivada]"
+              name="Salida de ordenación"
+              startId="Package\ETL Clientes\Ordenar.Outputs[Salida de ordenación]" />
+            <path
+              refId="Package\ETL Clientes.Paths[Salida de origen de archivo plano]"
+              endId="Package\ETL Clientes\Ordenar.Inputs[Entrada de ordenación]"
+              name="Salida de origen de archivo plano"
+              startId="Package\ETL Clientes\Origen de archivo plano.Outputs[Salida de origen de archivo plano]" />
+          </paths>
+        </pipeline>
+      </DTS:ObjectData>
+    </DTS:Executable>
+  </DTS:Executables>
+  <DTS:DesignTimeProperties><![CDATA[<?xml version="1.0"?>
+<!--Esta sección CDATA contiene la información de diseño del paquete. Esta sección incluye información como, por ejemplo, las coordenadas (x,y), el ancho y el alto.-->
+<!--Si edita manualmente esta sección y comete un error, puede eliminarlo. -->
+<!--El paquete podrá cargarse normalmente, pero se perderá la información de diseño anterior y el diseñador reorganizará los elementos automáticamente en la superficie de diseño.-->
+<Objects
+  Version="8">
+  <!--Cada uno de los nodos siguientes contiene propiedades que no afectan al comportamiento en tiempo de ejecución.-->
+  <Package
+    design-time-name="Package">
+    <LayoutInfo>
+      <GraphLayout
+        Capacity="4" xmlns="clr-namespace:Microsoft.SqlServer.IntegrationServices.Designer.Model.Serialization;assembly=Microsoft.SqlServer.IntegrationServices.Graph">
+        <NodeLayout
+          Size="136,42"
+          Id="Package\ETL Clientes"
+          TopLeft="122.142857402867,91.7647058019176" />
+      </GraphLayout>
+    </LayoutInfo>
+  </Package>
+  <TaskHost
+    design-time-name="Package\ETL Clientes">
+    <LayoutInfo>
+      <GraphLayout
+        Capacity="16" xmlns="clr-namespace:Microsoft.SqlServer.IntegrationServices.Designer.Model.Serialization;assembly=Microsoft.SqlServer.IntegrationServices.Graph" xmlns:mssgle="clr-namespace:Microsoft.SqlServer.Graph.LayoutEngine;assembly=Microsoft.SqlServer.Graph" xmlns:assembly="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:mssgm="clr-namespace:Microsoft.SqlServer.Graph.Model;assembly=Microsoft.SqlServer.Graph">
+        <NodeLayout
+          Size="170,42"
+          Id="Package\ETL Clientes\División condicional"
+          TopLeft="324.642857833937,345.838234990977" />
+        <NodeLayout
+          Size="190,42"
+          Id="Package\ETL Clientes\Origen de archivo plano"
+          TopLeft="316.785714960068,49.8970587797926" />
+        <NodeLayout
+          Size="168,42"
+          Id="Package\ETL Clientes\Destino de OLE DB"
+          TopLeft="94.6428573443269,497.05882309372" />
+        <NodeLayout
+          Size="117,42"
+          Id="Package\ETL Clientes\Ordenar"
+          TopLeft="347.500000739736,141.66176458171" />
+        <NodeLayout
+          Size="194,42"
+          Id="Package\ETL Clientes\Destino de archivo plano"
+          TopLeft="495.53571534058,437.220587897633" />
+        <NodeLayout
+          Size="163,42"
+          Id="Package\ETL Clientes\Columna derivada"
+          TopLeft="326.785714981355,259.426470360838" />
+        <NodeLayout
+          Size="174,42"
+          Id="Package\ETL Clientes\Conversión de datos"
+          TopLeft="94.6428573443269,435.882352559109" />
+        <EdgeLayout
+          Id="Package\ETL Clientes.Paths[Salida de ordenación]"
+          TopLeft="407.142857860546,183.26176458171">
+          <EdgeLayout.Curve>
+            <mssgle:Curve
+              StartConnector="{assembly:Null}"
+              EndConnector="0,76.1647057791275"
+              Start="0,0"
+              End="0,68.6647057791275">
+              <mssgle:Curve.Segments>
+                <mssgle:SegmentCollection
+                  Capacity="5">
+                  <mssgle:LineSegment
+                    End="0,68.6647057791275" />
+                </mssgle:SegmentCollection>
+              </mssgle:Curve.Segments>
+            </mssgle:Curve>
+          </EdgeLayout.Curve>
+          <EdgeLayout.Labels>
+            <EdgeLabelCollection />
+          </EdgeLayout.Labels>
+        </EdgeLayout>
+        <EdgeLayout
+          Id="Package\ETL Clientes.Paths[Salida de error de conversión de datos]"
+          TopLeft="269.042857344327,457.351470228371">
+          <EdgeLayout.Curve>
+            <mssgle:Curve
+              StartConnector="{assembly:Null}"
+              EndConnector="226.492857996253,0"
+              Start="0,0"
+              End="218.992857996253,0">
+              <mssgle:Curve.Segments>
+                <mssgle:SegmentCollection
+                  Capacity="5">
+                  <mssgle:LineSegment
+                    End="218.992857996253,0" />
+                </mssgle:SegmentCollection>
+              </mssgle:Curve.Segments>
+            </mssgle:Curve>
+          </EdgeLayout.Curve>
+          <EdgeLayout.Labels>
+            <mssgm:EdgeLabel
+              BoundingBox="23.7531868106265,5,171.486484375,10.3349609375"
+              RelativePosition="Any" />
+          </EdgeLayout.Labels>
+        </EdgeLayout>
+        <EdgeLayout
+          Id="Package\ETL Clientes.Paths[Salida de conversión de datos]"
+          TopLeft="269.042857344327,462.282352559109">
+          <EdgeLayout.Curve>
+            <mssgle:Curve
+              StartConnector="{assembly:Null}"
+              EndConnector="-6.40000000000003,55.5764705346117"
+              Start="0,0"
+              End="1.09999999999997,55.5764705346117">
+              <mssgle:Curve.Segments>
+                <mssgle:SegmentCollection
+                  Capacity="5">
+                  <mssgle:LineSegment
+                    End="18.5,0" />
+                  <mssgle:CubicBezierSegment
+                    Point1="18.5,0"
+                    Point2="22.5,0"
+                    Point3="22.5,4" />
+                  <mssgle:LineSegment
+                    End="22.5,51.5764705346117" />
+                  <mssgle:CubicBezierSegment
+                    Point1="22.5,51.5764705346117"
+                    Point2="22.5,55.5764705346117"
+                    Point3="18.5,55.5764705346117" />
+                  <mssgle:LineSegment
+                    End="1.09999999999997,55.5764705346117" />
+                </mssgle:SegmentCollection>
+              </mssgle:Curve.Segments>
+            </mssgle:Curve>
+          </EdgeLayout.Curve>
+          <EdgeLayout.Labels>
+            <EdgeLabelCollection />
+          </EdgeLayout.Labels>
+        </EdgeLayout>
+        <EdgeLayout
+          Id="Package\ETL Clientes.Paths[Salida de columna derivada]"
+          TopLeft="409.114286407646,301.026470360838">
+          <EdgeLayout.Curve>
+            <mssgle:Curve
+              StartConnector="{assembly:Null}"
+              EndConnector="0,44.8117646301392"
+              Start="0,0"
+              End="0,37.3117646301392">
+              <mssgle:Curve.Segments>
+                <mssgle:SegmentCollection
+                  Capacity="5">
+                  <mssgle:LineSegment
+                    End="0,37.3117646301392" />
+                </mssgle:SegmentCollection>
+              </mssgle:Curve.Segments>
+            </mssgle:Curve>
+          </EdgeLayout.Curve>
+          <EdgeLayout.Labels>
+            <EdgeLabelCollection />
+          </EdgeLayout.Labels>
+        </EdgeLayout>
+        <EdgeLayout
+          Id="Package\ETL Clientes.Paths[ClientesActivos]"
+          TopLeft="409.842857833937,387.438234990977">
+          <EdgeLayout.Curve>
+            <mssgle:Curve
+              StartConnector="{assembly:Null}"
+              EndConnector="-228.00000048961,48.4441175681317"
+              Start="0,0"
+              End="-228.00000048961,40.9441175681317">
+              <mssgle:Curve.Segments>
+                <mssgle:SegmentCollection
+                  Capacity="5">
+                  <mssgle:LineSegment
+                    End="0,20.2220587840658" />
+                  <mssgle:CubicBezierSegment
+                    Point1="0,20.2220587840658"
+                    Point2="0,24.2220587840658"
+                    Point3="-4,24.2220587840658" />
+                  <mssgle:LineSegment
+                    End="-224.00000048961,24.2220587840658" />
+                  <mssgle:CubicBezierSegment
+                    Point1="-224.00000048961,24.2220587840658"
+                    Point2="-228.00000048961,24.2220587840658"
+                    Point3="-228.00000048961,28.2220587840658" />
+                  <mssgle:LineSegment
+                    End="-228.00000048961,40.9441175681317" />
+                </mssgle:SegmentCollection>
+              </mssgle:Curve.Segments>
+            </mssgle:Curve>
+          </EdgeLayout.Curve>
+          <EdgeLayout.Labels>
+            <mssgm:EdgeLabel
+              BoundingBox="-147.545097901055,29.2220587840658,67.0901953125,9.7490234375"
+              RelativePosition="Any" />
+          </EdgeLayout.Labels>
+        </EdgeLayout>
+        <EdgeLayout
+          Id="Package\ETL Clientes.Paths[Salida de origen de archivo plano]"
+          TopLeft="408.942857849902,91.4970587797926">
+          <EdgeLayout.Curve>
+            <mssgle:Curve
+              StartConnector="{assembly:Null}"
+              EndConnector="0,50.1647058019176"
+              Start="0,0"
+              End="0,42.6647058019176">
+              <mssgle:Curve.Segments>
+                <mssgle:SegmentCollection
+                  Capacity="5">
+                  <mssgle:LineSegment
+                    End="0,42.6647058019176" />
+                </mssgle:SegmentCollection>
+              </mssgle:Curve.Segments>
+            </mssgle:Curve>
+          </EdgeLayout.Curve>
+          <EdgeLayout.Labels>
+            <EdgeLabelCollection />
+          </EdgeLayout.Labels>
+        </EdgeLayout>
+      </GraphLayout>
+    </LayoutInfo>
+  </TaskHost>
+  <PipelineComponentMetadata
+    design-time-name="Package\ETL Clientes\Destino de OLE DB">
+    <Properties>
+      <Property>
+        <Name>DataSourceViewID</Name>
+      </Property>
+      <Property>
+        <Name>TableInfoObjectType</Name>
+        <Value
+          type="q2:string">Table</Value>
+      </Property>
+    </Properties>
+  </PipelineComponentMetadata>
+</Objects>]]></DTS:DesignTimeProperties>
 </DTS:Executable>
