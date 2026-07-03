@@ -164,5 +164,5 @@ Ajustar las variables en `CargaVentas.dtsx`:
 ## 👤 Autor
 
 - **Proyecto:** Examen Práctico — ETL con SSIS, SQL Server y Git
-- **Empresa:** Comercializadora UTVT S.A. de C.V.
-- **Materia:** Business Intelligence / Integración de Datos
+- **Integrantes:** Joel Alejandro Lara Rodriguez y Jaime Diaz Gonzalez
+- **Materia:** DESARROLLO WEB INTEGRAL
