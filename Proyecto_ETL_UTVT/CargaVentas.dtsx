@@ -1,0 +1,510 @@
+<?xml version="1.0"?>
+<DTS:Executable
+  xmlns:DTS="www.microsoft.com/SqlServer/Dts"
+  DTS:ExecutableType="SSIS.Package.3"
+  DTS:ProtectionLevel="1"
+  DTS:PackageFormatVersion="8"
+  DTS:VersionMajor="1"
+  DTS:VersionMinor="0"
+  DTS:VersionBuild="0"
+  DTS:CreationDate="7/3/2026 7:00:00 AM"
+  DTS:PackageName="CargaVentas"
+  DTS:DTSID="{11111111-1111-1111-1111-111111111111}">
+
+  <!-- ============================================================ -->
+  <!-- VARIABLES DEL PAQUETE                                        -->
+  <!-- ============================================================ -->
+  <DTS:Variables>
+    <DTS:Variable DTS:Name="RutaEntrada"     DTS:DataType="8"><DTS:VariableValue>C:\Proyecto_ETL_UTVT\data\entrada\</DTS:VariableValue></DTS:Variable>
+    <DTS:Variable DTS:Name="RutaProcesado"   DTS:DataType="8"><DTS:VariableValue>C:\Proyecto_ETL_UTVT\data\procesados\</DTS:VariableValue></DTS:Variable>
+    <DTS:Variable DTS:Name="RutaErrores"     DTS:DataType="8"><DTS:VariableValue>C:\Proyecto_ETL_UTVT\data\errores\</DTS:VariableValue></DTS:Variable>
+    <DTS:Variable DTS:Name="FechaProceso"    DTS:DataType="16"><DTS:VariableValue>1/1/1900 12:00:00 AM</DTS:VariableValue></DTS:Variable>
+    <DTS:Variable DTS:Name="TotalLeidos"     DTS:DataType="3"><DTS:VariableValue>0</DTS:VariableValue></DTS:Variable>
+    <DTS:Variable DTS:Name="TotalInsertados" DTS:DataType="3"><DTS:VariableValue>0</DTS:VariableValue></DTS:Variable>
+    <DTS:Variable DTS:Name="TotalErrores"    DTS:DataType="3"><DTS:VariableValue>0</DTS:VariableValue></DTS:Variable>
+    <DTS:Variable DTS:Name="IdProcesoLog"    DTS:DataType="3"><DTS:VariableValue>0</DTS:VariableValue></DTS:Variable>
+  </DTS:Variables>
+
+  <!-- ============================================================ -->
+  <!-- CONTROL FLOW                                                  -->
+  <!--                                                              -->
+  <!--  SEQ_Inicio                                                  -->
+  <!--    SQL_RegistrarInicio                                       -->
+  <!--    SEQ_CargaClientes                                         -->
+  <!--      DFT_CargaClientes                                       -->
+  <!--    SEQ_CargaProductos                                        -->
+  <!--      DFT_CargaProductos                                      -->
+  <!--    SEQ_CargaVentas                                           -->
+  <!--      DFT_CargaVentas                                         -->
+  <!--    SQL_RegistrarEstadisticas                                 -->
+  <!--    SEQ_PostProceso                                           -->
+  <!--      FST_MoverClientes                                       -->
+  <!--      FST_MoverProductos                                      -->
+  <!--      FST_MoverVentas                                         -->
+  <!--      EPT_ComprimirArchivos                                   -->
+  <!-- ============================================================ -->
+
+  <DTS:Executables>
+
+    <!-- ── Sequence Container: Proceso Completo ── -->
+    <DTS:Executable DTS:ExecutableType="SSIS.Sequence.3"
+                    DTS:TaskName="SEQ_Inicio"
+                    DTS:DTSID="{AAAA0001-0000-0000-0000-000000000001}">
+      <DTS:Executables>
+
+        <!-- 1. Execute SQL: Registrar inicio en LogProceso -->
+        <DTS:Executable DTS:ExecutableType="Microsoft.ExecuteSQLTask"
+                        DTS:TaskName="SQL_RegistrarInicio"
+                        DTS:DTSID="{AAAA0002-0000-0000-0000-000000000002}">
+          <DTS:ObjectData>
+            <SQLTask:SqlTaskData
+              xmlns:SQLTask="www.microsoft.com/sqlserver/dts/tasks/sqltask"
+              SQLTask:Connection="CM_DWUTVTVentas"
+              SQLTask:ResultType="ResultSetType_SingleRow"
+              SQLTask:SqlStatementSource="INSERT INTO dbo.LogProceso (NombrePaquete, FechaInicio, Estatus, Mensaje)
+VALUES ('CargaVentas.dtsx', GETDATE(), 'EN_PROCESO', 'Inicio de ejecucion');
+SELECT SCOPE_IDENTITY() AS IdProceso;">
+              <SQLTask:ResultBinding
+                SQLTask:Name="IdProceso"
+                SQLTask:DtsVariableName="User::IdProcesoLog"
+                SQLTask:Type="1" />
+            </SQLTask:SqlTaskData>
+          </DTS:ObjectData>
+        </DTS:Executable>
+
+        <!-- 2. Sequence Container: Carga Clientes -->
+        <DTS:Executable DTS:ExecutableType="SSIS.Sequence.3"
+                        DTS:TaskName="SEQ_CargaClientes"
+                        DTS:DTSID="{AAAA0010-0000-0000-0000-000000000010}">
+          <DTS:Executables>
+            <!--
+              Data Flow Task: DFT_CargaClientes
+              ─────────────────────────────────
+              Fuente     : Flat File Source → Clientes.csv
+              Transformaciones:
+                - Derived Column  : TRIM(Nombre), TRIM(Apellido), UPPER(Nombre), UPPER(Apellido)
+                                    UPPER(Correo), ISNULL(Ciudad) → 'SIN CIUDAD', etc.
+                - Conditional Split:
+                    Activo == 1           → Válidos
+                    Else                  → Inactivos (Error Output)
+                - Sort (IdCliente ASC)  : para deduplicación
+                - Aggregate             : GROUP BY IdCliente (MIN para mantener primera ocurrencia)
+                - Data Conversion       : FechaRegistro a DT_DATE
+                - Lookup               : verificar que IdCliente no exista ya en DimCliente
+                - OLE DB Destination   : DimCliente
+                - Error handling       : Flat File Destination → errores/Errores_Clientes.csv
+                                         OLE DB Command → LogErrores
+            -->
+            <DTS:Executable DTS:ExecutableType="SSIS.Pipeline.3"
+                            DTS:TaskName="DFT_CargaClientes"
+                            DTS:DTSID="{AAAA0011-0000-0000-0000-000000000011}">
+              <DTS:ObjectData>
+                <pipeline version="1">
+                  <components>
+                    <!-- Flat File Source -->
+                    <component id="1" name="SRC_Clientes" componentClassID="Microsoft.FlatFileSource">
+                      <properties>
+                        <property name="RetainNulls">0</property>
+                      </properties>
+                      <connections>
+                        <connection id="1" name="FlatFileConnection" connectionManagerID="CM_FF_Clientes"/>
+                      </connections>
+                    </component>
+                    <!-- Derived Column: limpieza -->
+                    <component id="2" name="DRV_LimpiezaClientes" componentClassID="Microsoft.DerivedColumn">
+                      <inputs><input id="21" name="Derived Column Input"/></inputs>
+                      <outputs>
+                        <output id="22" name="Derived Column Output">
+                          <outputColumns>
+                            <outputColumn id="221" name="Nombre_Limpio"   dataType="str" length="100" expression="UPPER(TRIM([Nombre]))"/>
+                            <outputColumn id="222" name="Apellido_Limpio" dataType="str" length="100" expression="UPPER(TRIM([Apellido]))"/>
+                            <outputColumn id="223" name="Correo_Limpio"   dataType="str" length="150" expression="LOWER(TRIM([Correo]))"/>
+                            <outputColumn id="224" name="Ciudad_Limpia"   dataType="str" length="100" expression='ISNULL([Ciudad]) ? "SIN CIUDAD" : UPPER(TRIM([Ciudad]))'/>
+                            <outputColumn id="225" name="Estado_Limpio"   dataType="str" length="100" expression='ISNULL([Estado]) ? "SIN ESTADO" : UPPER(TRIM([Estado]))'/>
+                            <outputColumn id="226" name="Pais_Limpio"     dataType="str" length="100" expression='ISNULL([Pais]) ? "MEXICO" : UPPER(TRIM([Pais]))'/>
+                          </outputColumns>
+                        </output>
+                      </outputs>
+                    </component>
+                    <!-- Conditional Split: Activos vs Inactivos -->
+                    <component id="3" name="CSPL_FiltroActivos" componentClassID="Microsoft.ConditionalSplit">
+                      <outputs>
+                        <output id="31" name="Clientes_Activos"  isErrorOut="false"><outputColumns/><conditions><condition id="311" expression="[Activo] == 1" evaluationOrder="1" outputId="31"/></conditions></output>
+                        <output id="32" name="Clientes_Inactivos" isErrorOut="true"/>
+                      </outputs>
+                    </component>
+                    <!-- OLE DB Destination: DimCliente -->
+                    <component id="9" name="DST_DimCliente" componentClassID="Microsoft.OleDbDestination">
+                      <properties>
+                        <property name="OpenRowset">dbo.DimCliente</property>
+                        <property name="AccessMode">3</property>
+                      </properties>
+                      <connections>
+                        <connection id="91" name="OleDbConnection" connectionManagerID="CM_DWUTVTVentas"/>
+                      </connections>
+                    </component>
+                    <!-- Flat File Destination: errores -->
+                    <component id="10" name="DST_ErroresClientes" componentClassID="Microsoft.FlatFileDestination">
+                      <connections>
+                        <connection id="101" name="FlatFileConnection" connectionManagerID="CM_FF_ErroresClientes"/>
+                      </connections>
+                    </component>
+                  </components>
+                </pipeline>
+              </DTS:ObjectData>
+            </DTS:Executable>
+          </DTS:Executables>
+        </DTS:Executable>
+
+        <!-- 3. Sequence Container: Carga Productos -->
+        <DTS:Executable DTS:ExecutableType="SSIS.Sequence.3"
+                        DTS:TaskName="SEQ_CargaProductos"
+                        DTS:DTSID="{AAAA0020-0000-0000-0000-000000000020}">
+          <DTS:Executables>
+            <!--
+              Data Flow Task: DFT_CargaProductos
+              ────────────────────────────────────
+              Fuente     : Flat File Source → Productos.csv
+              Transformaciones:
+                - Derived Column  : TRIM / UPPER de campos de texto
+                - Conditional Split:
+                    Activo == 1
+                    AND Precio > 0
+                    AND Costo > 0
+                    AND Categoria IN ("COMPUTO","ACCESORIOS","MUEBLES","REDES","ALMACENAMIENTO","INFRAESTRUCTURA")
+                      → Válidos
+                    Else → Inválidos (Error Output)
+                - Sort (IdProducto ASC)
+                - Lookup: IdProducto no exista en DimProducto
+                - OLE DB Destination: DimProducto
+                - Error handling → Errores_Productos.csv + LogErrores
+            -->
+            <DTS:Executable DTS:ExecutableType="SSIS.Pipeline.3"
+                            DTS:TaskName="DFT_CargaProductos"
+                            DTS:DTSID="{AAAA0021-0000-0000-0000-000000000021}">
+              <DTS:ObjectData>
+                <pipeline version="1">
+                  <components>
+                    <component id="1" name="SRC_Productos" componentClassID="Microsoft.FlatFileSource">
+                      <connections><connection id="1" connectionManagerID="CM_FF_Productos"/></connections>
+                    </component>
+                    <component id="2" name="DRV_LimpiezaProductos" componentClassID="Microsoft.DerivedColumn">
+                      <outputs>
+                        <output id="22" name="Derived Column Output">
+                          <outputColumns>
+                            <outputColumn id="221" name="Nombre_Limpio"    dataType="str" length="150" expression="UPPER(TRIM([NombreProducto]))"/>
+                            <outputColumn id="222" name="Categoria_Limpia" dataType="str" length="100" expression="UPPER(TRIM([Categoria]))"/>
+                          </outputColumns>
+                        </output>
+                      </outputs>
+                    </component>
+                    <component id="3" name="CSPL_FiltroProductos" componentClassID="Microsoft.ConditionalSplit">
+                      <outputs>
+                        <output id="31" name="Productos_Validos" isErrorOut="false">
+                          <conditions>
+                            <condition id="311" evaluationOrder="1" outputId="31"
+                              expression='[Activo] == 1 &amp;&amp; [Precio] > 0 &amp;&amp; [Costo] > 0 &amp;&amp; ([Categoria_Limpia] == "COMPUTO" || [Categoria_Limpia] == "ACCESORIOS" || [Categoria_Limpia] == "MUEBLES" || [Categoria_Limpia] == "REDES" || [Categoria_Limpia] == "ALMACENAMIENTO" || [Categoria_Limpia] == "INFRAESTRUCTURA")'/>
+                          </conditions>
+                        </output>
+                        <output id="32" name="Productos_Invalidos" isErrorOut="true"/>
+                      </outputs>
+                    </component>
+                    <component id="9" name="DST_DimProducto" componentClassID="Microsoft.OleDbDestination">
+                      <properties>
+                        <property name="OpenRowset">dbo.DimProducto</property>
+                        <property name="AccessMode">3</property>
+                      </properties>
+                      <connections><connection id="91" connectionManagerID="CM_DWUTVTVentas"/></connections>
+                    </component>
+                  </components>
+                </pipeline>
+              </DTS:ObjectData>
+            </DTS:Executable>
+          </DTS:Executables>
+        </DTS:Executable>
+
+        <!-- 4. Sequence Container: Carga Ventas -->
+        <DTS:Executable DTS:ExecutableType="SSIS.Sequence.3"
+                        DTS:TaskName="SEQ_CargaVentas"
+                        DTS:DTSID="{AAAA0030-0000-0000-0000-000000000030}">
+          <DTS:Executables>
+            <!--
+              Data Flow Task: DFT_CargaVentas
+              ─────────────────────────────────
+              Fuente     : Flat File Source → Ventas.csv
+              Transformaciones:
+                - Conditional Split (validaciones):
+                    Cantidad > 0
+                    AND PrecioUnitario > 0
+                    AND FechaVenta válida (no nula)
+                    → Válidos / Else → Inválidos
+                - Lookup IdCliente  en DimCliente  → obtener IdClienteSK
+                - Lookup IdProducto en DimProducto → obtener IdProductoSK
+                - Lookup IdVenta en FactVentas      → deduplicación
+                - Derived Column: cálculo de métricas
+                    Subtotal = Cantidad * PrecioUnitario
+                    IVA      = Subtotal * 0.16
+                    Total    = Subtotal + IVA
+                - OLE DB Destination: FactVentas
+                - Error handling → Errores_Ventas.csv + LogErrores
+            -->
+            <DTS:Executable DTS:ExecutableType="SSIS.Pipeline.3"
+                            DTS:TaskName="DFT_CargaVentas"
+                            DTS:DTSID="{AAAA0031-0000-0000-0000-000000000031}">
+              <DTS:ObjectData>
+                <pipeline version="1">
+                  <components>
+                    <component id="1" name="SRC_Ventas" componentClassID="Microsoft.FlatFileSource">
+                      <connections><connection id="1" connectionManagerID="CM_FF_Ventas"/></connections>
+                    </component>
+                    <component id="2" name="CSPL_ValidacionVentas" componentClassID="Microsoft.ConditionalSplit">
+                      <outputs>
+                        <output id="21" name="Ventas_Validas" isErrorOut="false">
+                          <conditions>
+                            <condition id="211" evaluationOrder="1" outputId="21"
+                              expression="[Cantidad] > 0 &amp;&amp; [PrecioUnitario] > 0 &amp;&amp; !ISNULL([FechaVenta])"/>
+                          </conditions>
+                        </output>
+                        <output id="22" name="Ventas_Invalidas" isErrorOut="true"/>
+                      </outputs>
+                    </component>
+                    <!-- Lookup: Cliente -->
+                    <component id="3" name="LKP_Cliente" componentClassID="Microsoft.Lookup">
+                      <properties>
+                        <property name="SqlCommand">SELECT IdClienteSK, IdClienteOrigen FROM dbo.DimCliente</property>
+                        <property name="NoMatchBehavior">1</property>
+                      </properties>
+                      <connections><connection id="31" connectionManagerID="CM_DWUTVTVentas"/></connections>
+                    </component>
+                    <!-- Lookup: Producto -->
+                    <component id="4" name="LKP_Producto" componentClassID="Microsoft.Lookup">
+                      <properties>
+                        <property name="SqlCommand">SELECT IdProductoSK, IdProductoOrigen FROM dbo.DimProducto</property>
+                        <property name="NoMatchBehavior">1</property>
+                      </properties>
+                      <connections><connection id="41" connectionManagerID="CM_DWUTVTVentas"/></connections>
+                    </component>
+                    <!-- Derived Column: métricas -->
+                    <component id="5" name="DRV_Metricas" componentClassID="Microsoft.DerivedColumn">
+                      <outputs>
+                        <output id="51" name="Derived Column Output">
+                          <outputColumns>
+                            <outputColumn id="511" name="Subtotal" dataType="numeric" precision="12" scale="2" expression="(DT_NUMERIC,12,2)([Cantidad] * [PrecioUnitario])"/>
+                            <outputColumn id="512" name="IVA"      dataType="numeric" precision="12" scale="2" expression="(DT_NUMERIC,12,2)([Subtotal] * 0.16)"/>
+                            <outputColumn id="513" name="Total"    dataType="numeric" precision="12" scale="2" expression="(DT_NUMERIC,12,2)([Subtotal] + [IVA])"/>
+                          </outputColumns>
+                        </output>
+                      </outputs>
+                    </component>
+                    <component id="9" name="DST_FactVentas" componentClassID="Microsoft.OleDbDestination">
+                      <properties>
+                        <property name="OpenRowset">dbo.FactVentas</property>
+                        <property name="AccessMode">3</property>
+                      </properties>
+                      <connections><connection id="91" connectionManagerID="CM_DWUTVTVentas"/></connections>
+                    </component>
+                  </components>
+                </pipeline>
+              </DTS:ObjectData>
+            </DTS:Executable>
+          </DTS:Executables>
+        </DTS:Executable>
+
+        <!-- 5. Execute SQL: Registrar estadísticas finales en LogProceso -->
+        <DTS:Executable DTS:ExecutableType="Microsoft.ExecuteSQLTask"
+                        DTS:TaskName="SQL_RegistrarEstadisticas"
+                        DTS:DTSID="{AAAA0040-0000-0000-0000-000000000040}">
+          <DTS:ObjectData>
+            <SQLTask:SqlTaskData
+              xmlns:SQLTask="www.microsoft.com/sqlserver/dts/tasks/sqltask"
+              SQLTask:Connection="CM_DWUTVTVentas"
+              SQLTask:SqlStatementSource="UPDATE dbo.LogProceso
+SET FechaFin          = GETDATE(),
+    DuracionSegundos  = DATEDIFF(SECOND, FechaInicio, GETDATE()),
+    TotalLeidos       = ?,
+    TotalInsertados   = ?,
+    TotalErrores      = ?,
+    Estatus           = 'EXITOSO',
+    Mensaje           = 'Proceso completado correctamente'
+WHERE IdProceso = ?;">
+              <SQLTask:ParameterBinding SQLTask:ParameterName="0" SQLTask:DtsVariableName="User::TotalLeidos"     SQLTask:Direction="Input" SQLTask:DataType="3"/>
+              <SQLTask:ParameterBinding SQLTask:ParameterName="1" SQLTask:DtsVariableName="User::TotalInsertados" SQLTask:Direction="Input" SQLTask:DataType="3"/>
+              <SQLTask:ParameterBinding SQLTask:ParameterName="2" SQLTask:DtsVariableName="User::TotalErrores"    SQLTask:Direction="Input" SQLTask:DataType="3"/>
+              <SQLTask:ParameterBinding SQLTask:ParameterName="3" SQLTask:DtsVariableName="User::IdProcesoLog"    SQLTask:Direction="Input" SQLTask:DataType="3"/>
+            </SQLTask:SqlTaskData>
+          </DTS:ObjectData>
+        </DTS:Executable>
+
+        <!-- 6. Sequence Container: Post-Proceso (Mover y Comprimir) -->
+        <DTS:Executable DTS:ExecutableType="SSIS.Sequence.3"
+                        DTS:TaskName="SEQ_PostProceso"
+                        DTS:DTSID="{AAAA0050-0000-0000-0000-000000000050}">
+          <DTS:Executables>
+
+            <!-- File System Task: Mover Clientes.csv a Procesados -->
+            <DTS:Executable DTS:ExecutableType="Microsoft.FileSystemTask"
+                            DTS:TaskName="FST_MoverClientes"
+                            DTS:DTSID="{AAAA0051-0000-0000-0000-000000000051}">
+              <DTS:ObjectData>
+                <FileSystemData FileSystemData_Operation="6"
+                                FileSystemData_OverwriteDestination="True"
+                                FileSystemData_IsSourcePathVariable="True"
+                                FileSystemData_Source="User::RutaEntrada"
+                                FileSystemData_IsDestinationPathVariable="True"
+                                FileSystemData_Destination="User::RutaProcesado"/>
+              </DTS:ObjectData>
+            </DTS:Executable>
+
+            <!-- File System Task: Mover Productos.csv -->
+            <DTS:Executable DTS:ExecutableType="Microsoft.FileSystemTask"
+                            DTS:TaskName="FST_MoverProductos"
+                            DTS:DTSID="{AAAA0052-0000-0000-0000-000000000052}">
+            </DTS:Executable>
+
+            <!-- File System Task: Mover Ventas.csv -->
+            <DTS:Executable DTS:ExecutableType="Microsoft.FileSystemTask"
+                            DTS:TaskName="FST_MoverVentas"
+                            DTS:DTSID="{AAAA0053-0000-0000-0000-000000000053}">
+            </DTS:Executable>
+
+            <!-- Execute Process Task: Comprimir archivos con PowerShell -->
+            <!--
+              PowerShell command (parametrizado con FechaProceso):
+              Compress-Archive -Path "C:\...\procesados\*"
+                               -DestinationPath "C:\...\procesados\Procesados_YYYYMMDD_HHMMSS.zip"
+            -->
+            <DTS:Executable DTS:ExecutableType="Microsoft.ExecuteProcess"
+                            DTS:TaskName="EPT_ComprimirArchivos"
+                            DTS:DTSID="{AAAA0054-0000-0000-0000-000000000054}">
+              <DTS:ObjectData>
+                <ExecuteProcessData>
+                  <Executable>powershell.exe</Executable>
+                  <Arguments>-NoProfile -NonInteractive -Command "$fecha = Get-Date -Format 'yyyyMMdd_HHmmss'; Compress-Archive -Path '@[User::RutaProcesado]*' -DestinationPath ('@[User::RutaProcesado]Procesados_' + $fecha + '.zip') -Force"</Arguments>
+                  <WorkingDirectory></WorkingDirectory>
+                  <TimeOut>120</TimeOut>
+                  <TerminateProcessAfterTimeOut>False</TerminateProcessAfterTimeOut>
+                  <WindowStyle>1</WindowStyle>
+                  <StandardInputVariable></StandardInputVariable>
+                  <StandardOutputVariable></StandardOutputVariable>
+                  <StandardErrorVariable></StandardErrorVariable>
+                  <RequireFullFileName>True</RequireFullFileName>
+                  <SuccessValue>0</SuccessValue>
+                </ExecuteProcessData>
+              </DTS:ObjectData>
+            </DTS:Executable>
+
+          </DTS:Executables>
+        </DTS:Executable>
+
+      </DTS:Executables>
+
+      <!-- Precedence Constraints (orden de ejecución) -->
+      <DTS:PrecedenceConstraints>
+        <DTS:PrecedenceConstraint DTS:From="SQL_RegistrarInicio"      DTS:To="SEQ_CargaClientes"       DTS:EvalOp="1"/>
+        <DTS:PrecedenceConstraint DTS:From="SEQ_CargaClientes"        DTS:To="SEQ_CargaProductos"      DTS:EvalOp="1"/>
+        <DTS:PrecedenceConstraint DTS:From="SEQ_CargaProductos"       DTS:To="SEQ_CargaVentas"         DTS:EvalOp="1"/>
+        <DTS:PrecedenceConstraint DTS:From="SEQ_CargaVentas"          DTS:To="SQL_RegistrarEstadisticas" DTS:EvalOp="1"/>
+        <DTS:PrecedenceConstraint DTS:From="SQL_RegistrarEstadisticas" DTS:To="SEQ_PostProceso"          DTS:EvalOp="1"/>
+      </DTS:PrecedenceConstraints>
+
+    </DTS:Executable>
+  </DTS:Executables>
+
+  <!-- ============================================================ -->
+  <!-- CONNECTION MANAGERS                                           -->
+  <!-- ============================================================ -->
+  <DTS:ConnectionManagers>
+    <!-- OLE DB: SQL Server DWUTVTVentas -->
+    <DTS:ConnectionManager DTS:Name="CM_DWUTVTVentas"
+                           DTS:DTSID="{CCCC0001-0000-0000-0000-000000000001}"
+                           DTS:CreationName="OLEDB">
+      <DTS:ObjectData>
+        <DTS:ConnectionManager DTS:ConnectionString="Provider=SQLNCLI11;Server=localhost;Database=DWUTVTVentas;Integrated Security=SSPI;"/>
+      </DTS:ObjectData>
+    </DTS:ConnectionManager>
+    <!-- Flat File: Clientes.csv -->
+    <DTS:ConnectionManager DTS:Name="CM_FF_Clientes"
+                           DTS:DTSID="{CCCC0002-0000-0000-0000-000000000002}"
+                           DTS:CreationName="FLATFILE">
+      <DTS:ObjectData>
+        <DTS:ConnectionManager DTS:Format="Delimited"
+                               DTS:ColumnNamesInFirstDataRow="True"
+                               DTS:HeaderRowDelimiter="\r\n"
+                               DTS:RowDelimiter="\r\n"
+                               DTS:TextQualifier="&quot;"
+                               DTS:CodePage="65001"
+                               DTS:ConnectionString="C:\Proyecto_ETL_UTVT\data\entrada\Clientes.csv">
+          <DTS:FlatFileColumns>
+            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="4"  DTS:MaximumWidth="50"  DTS:Name="IdCliente"/>
+            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="129" DTS:MaximumWidth="100" DTS:Name="Nombre"/>
+            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="129" DTS:MaximumWidth="100" DTS:Name="Apellido"/>
+            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="129" DTS:MaximumWidth="150" DTS:Name="Correo"/>
+            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="129" DTS:MaximumWidth="20"  DTS:Name="Telefono"/>
+            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="129" DTS:MaximumWidth="100" DTS:Name="Ciudad"/>
+            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="129" DTS:MaximumWidth="100" DTS:Name="Estado"/>
+            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="129" DTS:MaximumWidth="100" DTS:Name="Pais"/>
+            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="4"  DTS:MaximumWidth="10"  DTS:Name="Activo"/>
+            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="\r\n" DTS:DataType="129" DTS:MaximumWidth="20" DTS:Name="FechaRegistro"/>
+          </DTS:FlatFileColumns>
+        </DTS:ConnectionManager>
+      </DTS:ObjectData>
+    </DTS:ConnectionManager>
+    <!-- Flat File: Productos.csv -->
+    <DTS:ConnectionManager DTS:Name="CM_FF_Productos"
+                           DTS:DTSID="{CCCC0003-0000-0000-0000-000000000003}"
+                           DTS:CreationName="FLATFILE">
+      <DTS:ObjectData>
+        <DTS:ConnectionManager DTS:Format="Delimited"
+                               DTS:ColumnNamesInFirstDataRow="True"
+                               DTS:RowDelimiter="\r\n"
+                               DTS:TextQualifier="&quot;"
+                               DTS:CodePage="65001"
+                               DTS:ConnectionString="C:\Proyecto_ETL_UTVT\data\entrada\Productos.csv">
+          <DTS:FlatFileColumns>
+            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="4"  DTS:MaximumWidth="50"  DTS:Name="IdProducto"/>
+            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="129" DTS:MaximumWidth="150" DTS:Name="NombreProducto"/>
+            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="129" DTS:MaximumWidth="100" DTS:Name="Categoria"/>
+            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="5"  DTS:MaximumWidth="20"  DTS:Name="Precio"/>
+            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="5"  DTS:MaximumWidth="20"  DTS:Name="Costo"/>
+            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="\r\n" DTS:DataType="4" DTS:MaximumWidth="5" DTS:Name="Activo"/>
+          </DTS:FlatFileColumns>
+        </DTS:ConnectionManager>
+      </DTS:ObjectData>
+    </DTS:ConnectionManager>
+    <!-- Flat File: Ventas.csv -->
+    <DTS:ConnectionManager DTS:Name="CM_FF_Ventas"
+                           DTS:DTSID="{CCCC0004-0000-0000-0000-000000000004}"
+                           DTS:CreationName="FLATFILE">
+      <DTS:ObjectData>
+        <DTS:ConnectionManager DTS:Format="Delimited"
+                               DTS:ColumnNamesInFirstDataRow="True"
+                               DTS:RowDelimiter="\r\n"
+                               DTS:TextQualifier="&quot;"
+                               DTS:CodePage="65001"
+                               DTS:ConnectionString="C:\Proyecto_ETL_UTVT\data\entrada\Ventas.csv">
+          <DTS:FlatFileColumns>
+            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="4"  DTS:MaximumWidth="50"  DTS:Name="IdVenta"/>
+            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="4"  DTS:MaximumWidth="50"  DTS:Name="IdCliente"/>
+            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="4"  DTS:MaximumWidth="50"  DTS:Name="IdProducto"/>
+            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="4"  DTS:MaximumWidth="20"  DTS:Name="Cantidad"/>
+            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="5"  DTS:MaximumWidth="20"  DTS:Name="PrecioUnitario"/>
+            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="," DTS:DataType="129" DTS:MaximumWidth="20" DTS:Name="FechaVenta"/>
+            <DTS:FlatFileColumn DTS:ColumnType="Delimited" DTS:ColumnDelimiter="\r\n" DTS:DataType="129" DTS:MaximumWidth="100" DTS:Name="Sucursal"/>
+          </DTS:FlatFileColumns>
+        </DTS:ConnectionManager>
+      </DTS:ObjectData>
+    </DTS:ConnectionManager>
+    <!-- Flat File: Errores Clientes -->
+    <DTS:ConnectionManager DTS:Name="CM_FF_ErroresClientes"
+                           DTS:DTSID="{CCCC0005-0000-0000-0000-000000000005}"
+                           DTS:CreationName="FLATFILE">
+      <DTS:ObjectData>
+        <DTS:ConnectionManager DTS:Format="Delimited"
+                               DTS:ColumnNamesInFirstDataRow="True"
+                               DTS:CodePage="65001"
+                               DTS:ConnectionString="C:\Proyecto_ETL_UTVT\data\errores\Errores_Clientes.csv"/>
+      </DTS:ObjectData>
+    </DTS:ConnectionManager>
+  </DTS:ConnectionManagers>
+
+</DTS:Executable>
